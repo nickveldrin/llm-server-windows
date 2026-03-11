@@ -1,0 +1,90 @@
+#!/bin/bash
+#
+# llm-server-gui — Terminal model selector for llm-server
+# Lists available GGUF models and launches llm-server with the selected one.
+#
+# Usage:
+#   llm-server-gui                    # Select from ~/ai_models
+#   llm-server-gui --model-dir /path  # Custom model directory
+
+set -euo pipefail
+
+MODEL_DIR="${LLM_MODEL_DIR:-$HOME/ai_models}"
+LAUNCHER="$(dirname "$0")/llm-server"
+
+# Parse args (pass through to llm-server)
+PASSTHROUGH_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --model-dir) MODEL_DIR="$2"; PASSTHROUGH_ARGS+=("$1" "$2"); shift 2 ;;
+        *)           PASSTHROUGH_ARGS+=("$1"); shift ;;
+    esac
+done
+
+if [[ ! -d "$MODEL_DIR" ]]; then
+    echo "Error: Model directory not found: $MODEL_DIR"
+    exit 1
+fi
+
+if [[ ! -x "$LAUNCHER" ]]; then
+    echo "Error: llm-server not found at $LAUNCHER"
+    exit 1
+fi
+
+# Find GGUF models (show first file of split GGUFs, skip duplicates)
+declare -a MODEL_PATHS MODEL_DISPLAY
+idx=0
+
+while IFS= read -r file; do
+    basename=$(basename "$file")
+    # Skip split GGUF parts that aren't the first file
+    if [[ "$basename" =~ -[0-9]+-of-[0-9]+\.gguf$ ]]; then
+        [[ ! "$basename" =~ -00001-of-[0-9]+\.gguf$ ]] && continue
+    fi
+
+    # Get total size (including all split parts)
+    dir=$(dirname "$file")
+    pattern=$(echo "$basename" | sed 's/-[0-9]*-of-[0-9]*\.gguf/.gguf/')
+    total_bytes=$(find "$dir" -name "${pattern%.gguf}*" -type f 2>/dev/null | xargs du -scb 2>/dev/null | tail -1 | awk '{print $1}')
+    [[ -z "$total_bytes" || "$total_bytes" == "0" ]] && total_bytes=$(du -sb "$file" | awk '{print $1}')
+    size_gb=$(awk "BEGIN {printf \"%.1f\", $total_bytes/1073741824}")
+
+    # Detect MoE from filename patterns (A3B, A10B, etc.)
+    arch="dense"
+    [[ "$basename" =~ A[0-9]+B ]] && arch="MoE"
+
+    MODEL_PATHS+=("$file")
+    MODEL_DISPLAY+=("$basename (${size_gb}GB, $arch)")
+    idx=$(( idx + 1 ))
+done < <(find "$MODEL_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
+
+if (( idx == 0 )); then
+    echo "No GGUF models found in $MODEL_DIR"
+    exit 1
+fi
+
+# Display menu
+echo ""
+echo "═══ Available Models ═══"
+echo ""
+for i in $(seq 0 $(( idx - 1 ))); do
+    printf "  %2d. %s\n" "$((i+1))" "${MODEL_DISPLAY[$i]}"
+done
+echo ""
+
+# Read selection
+while true; do
+    read -rp "Select model (1-$idx, q to quit): " choice
+    [[ "$choice" == "q" || "$choice" == "Q" ]] && exit 0
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= idx )); then
+        break
+    fi
+    echo "Invalid choice."
+done
+
+SELECTED="${MODEL_PATHS[$((choice-1))]}"
+echo ""
+echo "Launching: $(basename "$SELECTED")"
+echo ""
+
+exec "$LAUNCHER" "${PASSTHROUGH_ARGS[@]}" "$SELECTED"

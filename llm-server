@@ -1,0 +1,1034 @@
+#!/bin/bash
+#
+# llm-server — Universal smart launcher for ik_llama.cpp / llama.cpp
+# Auto-detects GPUs, RAM, model architecture (dense/MoE), and optimizes placement.
+# Works on any system: 0-8+ GPUs, any VRAM/RAM configuration.
+#
+# Usage:
+#   llm-server <model.gguf>              # Launch with auto-tuning
+#   llm-server <model.gguf> --retune     # Force re-optimization
+#   llm-server <model.gguf> --dry-run    # Print command without executing
+#   llm-server --port 8082 <model.gguf>  # Custom port
+#   llm-server <model.gguf> --benchmark  # Start, run quick benchmark, print tok/s
+#
+# Environment variables:
+#   LLAMA_SERVER    Path to llama-server binary (auto-detected if not set)
+#   LLM_MODEL_DIR   Default model directory (default: ~/ai_models)
+#   LLM_PORT        Server port (default: 8081)
+#   LLM_CTX_SIZE    Context size (default: 65536)
+
+set -euo pipefail
+
+# ═══════════════════════════════════════════════════════════════
+# Section 1: Configuration & Argument Parsing
+# ═══════════════════════════════════════════════════════════════
+
+VERSION="1.0.0"
+PORT="${LLM_PORT:-8081}"
+HOST="0.0.0.0"
+CTX_SIZE="${LLM_CTX_SIZE:-65536}"
+MODEL_DIR="${LLM_MODEL_DIR:-$HOME/ai_models}"
+CACHE_DIR="$HOME/.cache/llm-server"
+SERVER_LOG="/tmp/llm-server.log"
+
+RETUNE=0
+DRY_RUN=0
+VERBOSE=0
+BENCHMARK=0
+MODEL_ARG=""
+
+# Auto-detect llama-server binary
+find_server_binary() {
+    if [[ -n "${LLAMA_SERVER:-}" && -x "$LLAMA_SERVER" ]]; then
+        echo "$LLAMA_SERVER"
+        return
+    fi
+    # Prefer ik_llama.cpp (faster multi-GPU)
+    local candidates=(
+        "$HOME/ik_llama.cpp/build/bin/llama-server"
+        "$HOME/llama.cpp/build/bin/llama-server"
+        "$(command -v llama-server 2>/dev/null || true)"
+    )
+    for bin in "${candidates[@]}"; do
+        [[ -n "$bin" && -x "$bin" ]] && echo "$bin" && return
+    done
+    echo ""
+}
+
+LLAMA_SERVER="$(find_server_binary)"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --retune)    RETUNE=1; shift ;;
+        --dry-run)   DRY_RUN=1; shift ;;
+        --verbose)   VERBOSE=1; shift ;;
+        --benchmark) BENCHMARK=1; shift ;;
+        --port)      PORT="$2"; shift 2 ;;
+        --ctx-size)  CTX_SIZE="$2"; shift 2 ;;
+        --model-dir) MODEL_DIR="$2"; shift 2 ;;
+        --version)   echo "llm-server v$VERSION"; exit 0 ;;
+        --help|-h)
+            sed -n '2,/^$/s/^# \?//p' "$0"
+            exit 0
+            ;;
+        *)           MODEL_ARG="$1"; shift ;;
+    esac
+done
+
+if [[ -z "$MODEL_ARG" ]]; then
+    echo "Error: No model specified. Usage: llm-server <model.gguf>"
+    exit 1
+fi
+
+if [[ ! -f "$MODEL_ARG" ]]; then
+    # Try as relative to model dir
+    if [[ -f "$MODEL_DIR/$MODEL_ARG" ]]; then
+        MODEL_ARG="$MODEL_DIR/$MODEL_ARG"
+    else
+        echo "Error: Model not found: $MODEL_ARG"
+        exit 1
+    fi
+fi
+
+if [[ -z "$LLAMA_SERVER" ]]; then
+    echo "Error: llama-server binary not found."
+    echo "Set LLAMA_SERVER env var or install ik_llama.cpp / llama.cpp."
+    exit 1
+fi
+
+MODEL_PATH="$MODEL_ARG"
+MODEL_NAME="$(basename "$MODEL_PATH")"
+
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+log() { [[ "$VERBOSE" == "1" ]] && echo "[DEBUG] $*" >&2 || true; }
+
+# ═══════════════════════════════════════════════════════════════
+# Section 2: Hardware Detection
+# ═══════════════════════════════════════════════════════════════
+
+echo "═══ llm-server v$VERSION ═══"
+echo "Binary: $LLAMA_SERVER"
+
+# Detect physical CPU cores
+PHYSICAL_CORES=$(lscpu 2>/dev/null | awk '/^Core\(s\) per socket:/ {cores=$NF} /^Socket\(s\):/ {socks=$NF} END {print cores * socks}')
+PHYSICAL_CORES=${PHYSICAL_CORES:-4}
+
+# Detect RAM
+RAM_AVAIL_MB=$(awk '/MemAvailable/ {printf "%.0f", $2/1024}' /proc/meminfo)
+RAM_TOTAL_MB=$(awk '/MemTotal/ {printf "%.0f", $2/1024}' /proc/meminfo)
+
+echo "CPU: ${PHYSICAL_CORES} physical cores"
+echo "RAM: ${RAM_AVAIL_MB}MB available / ${RAM_TOTAL_MB}MB total"
+
+# Detect GPUs
+GPU_COUNT=0
+declare -a GPU_INDEX GPU_NAME GPU_VRAM_TOTAL GPU_VRAM_FREE GPU_PCIE_WIDTH GPU_PCIE_GEN GPU_BANDWIDTH
+
+if command -v nvidia-smi &>/dev/null; then
+    while IFS= read -r line; do
+        # Parse comma-separated fields (name field may contain spaces)
+        idx=$(echo "$line" | awk -F', ' '{print $1}')
+        name=$(echo "$line" | awk -F', ' '{print $2}')
+        vram_total=$(echo "$line" | awk -F', ' '{print $NF-3}' | tr -d ' ')
+        vram_free=$(echo "$line" | awk -F', ' '{print $(NF-2)}' | tr -d ' ')
+        pcie_width=$(echo "$line" | awk -F', ' '{print $(NF-1)}' | tr -d ' ')
+        pcie_gen=$(echo "$line" | awk -F', ' '{print $NF}' | tr -d ' ')
+        # Robust field extraction: split by ", " into array
+        IFS=',' read -ra fields <<< "$line"
+        idx=$(echo "${fields[0]}" | tr -d ' ')
+        name=$(echo "${fields[1]}" | sed 's/^ //')
+        vram_total=$(echo "${fields[2]}" | tr -d ' ')
+        vram_free=$(echo "${fields[3]}" | tr -d ' ')
+        pcie_width=$(echo "${fields[4]}" | tr -d ' ')
+        pcie_gen=$(echo "${fields[5]}" | tr -d ' ')
+
+        # Skip GPUs with less than 500MB free
+        if (( vram_free < 500 )); then
+            log "Skipping GPU $idx ($name): only ${vram_free}MB free"
+            continue
+        fi
+        GPU_INDEX+=("$idx")
+        GPU_NAME+=("$name")
+        GPU_VRAM_TOTAL+=("$vram_total")
+        GPU_VRAM_FREE+=("$vram_free")
+        GPU_PCIE_WIDTH+=("$pcie_width")
+        GPU_PCIE_GEN+=("$pcie_gen")
+        # Effective bandwidth score: width * gen (higher = faster)
+        GPU_BANDWIDTH+=( $(( pcie_width * pcie_gen )) )
+        GPU_COUNT=$(( GPU_COUNT + 1 ))
+    done < <(nvidia-smi --query-gpu=index,name,memory.total,memory.free,pcie.link.width.current,pcie.link.gen.current --format=csv,noheader,nounits 2>/dev/null)
+fi
+
+if (( GPU_COUNT == 0 )); then
+    echo "GPUs: none detected (CPU-only mode)"
+else
+    echo "GPUs: $GPU_COUNT detected"
+    # Sort GPUs by bandwidth (descending) — build priority order
+    declare -a GPU_ORDER
+    GPU_ORDER=($(
+        for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+            echo "${GPU_BANDWIDTH[$i]} $i"
+        done | sort -rn | awk '{print $2}'
+    ))
+
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        gi=${GPU_ORDER[$i]}
+        echo "  GPU${GPU_INDEX[$gi]}: ${GPU_NAME[$gi]} ${GPU_VRAM_FREE[$gi]}MB free / ${GPU_VRAM_TOTAL[$gi]}MB total (PCIe x${GPU_PCIE_WIDTH[$gi]} gen${GPU_PCIE_GEN[$gi]})"
+    done
+fi
+
+# ═══════════════════════════════════════════════════════════════
+# Section 3: Model Detection
+# ═══════════════════════════════════════════════════════════════
+
+# Get total model size (handles split GGUFs)
+MODEL_DIR_PATH=$(dirname "$MODEL_PATH")
+SPLIT_PATTERN=$(echo "$MODEL_NAME" | sed 's/-[0-9]*-of-[0-9]*\.gguf/.gguf/')
+TOTAL_SIZE_BYTES=$(find "$MODEL_DIR_PATH" -name "${SPLIT_PATTERN%.gguf}*" -type f 2>/dev/null | xargs du -scb 2>/dev/null | tail -1 | awk '{print $1}')
+if [[ -z "$TOTAL_SIZE_BYTES" || "$TOTAL_SIZE_BYTES" == "0" ]]; then
+    TOTAL_SIZE_BYTES=$(du -sb "$MODEL_PATH" | awk '{print $1}')
+fi
+TOTAL_SIZE_MB=$(awk "BEGIN {printf \"%.0f\", $TOTAL_SIZE_BYTES/1048576}")
+TOTAL_SIZE_GB=$(awk "BEGIN {printf \"%.1f\", $TOTAL_SIZE_BYTES/1073741824}")
+
+# Read GGUF metadata
+read LAYER_COUNT EXPERT_COUNT HEAD_COUNT_KV KEY_LENGTH VALUE_LENGTH HAS_SSM < <(python3 -c "
+import struct
+r = {}
+with open('$MODEL_PATH', 'rb') as f:
+    f.read(4); f.read(4); f.read(8)
+    kv_count = struct.unpack('<Q', f.read(8))[0]
+    for _ in range(kv_count):
+        kl = struct.unpack('<Q', f.read(8))[0]
+        key = f.read(kl).decode('utf-8', errors='replace')
+        vt = struct.unpack('<I', f.read(4))[0]
+        if vt == 4:
+            val = struct.unpack('<I', f.read(4))[0]
+            if key.endswith('.block_count'): r['layers'] = val
+            if 'expert_count' in key and 'used' not in key: r['experts'] = val
+            if 'head_count_kv' in key: r['hkv'] = val
+            if 'key_length' in key: r['kl'] = val
+            if 'value_length' in key: r['vl'] = val
+            if 'ssm.state_size' in key: r['ssm'] = 1
+        elif vt == 8: f.read(struct.unpack('<Q', f.read(8))[0])
+        elif vt in (5, 6): f.read(4)
+        elif vt == 7: f.read(1)
+        elif vt in (0, 1): f.read(1)
+        elif vt in (2, 3): f.read(2)
+        elif vt == 10: f.read(8)
+        elif vt == 9:
+            at = struct.unpack('<I', f.read(4))[0]
+            al = struct.unpack('<Q', f.read(8))[0]
+            s = {0:1,1:1,2:2,3:2,4:4,5:4,6:4,7:1,10:8}
+            if at in s: f.read(al * s[at])
+            elif at == 8:
+                for _ in range(al): f.read(struct.unpack('<Q', f.read(8))[0])
+        else: break
+print(r.get('layers',0), r.get('experts',0), r.get('hkv',0), r.get('kl',0), r.get('vl',0), r.get('ssm',0))
+" 2>/dev/null || echo "0 0 0 0 0 0")
+
+LAYER_COUNT=${LAYER_COUNT:-0}
+EXPERT_COUNT=${EXPERT_COUNT:-0}
+HEAD_COUNT_KV=${HEAD_COUNT_KV:-0}
+KEY_LENGTH=${KEY_LENGTH:-0}
+VALUE_LENGTH=${VALUE_LENGTH:-0}
+HAS_SSM=${HAS_SSM:-0}
+
+[[ "$LAYER_COUNT" == "0" ]] && LAYER_COUNT=48 && echo "Warning: Could not detect layer count, using default (48)"
+
+IS_MOE=0
+(( EXPERT_COUNT > 1 )) && IS_MOE=1
+
+echo ""
+echo "Model: $MODEL_NAME"
+echo "Size: ${TOTAL_SIZE_GB}GB (${TOTAL_SIZE_MB}MB)"
+echo "Architecture: ${LAYER_COUNT} layers, $([ "$IS_MOE" = "1" ] && echo "${EXPERT_COUNT} experts (MoE)" || echo "dense")"
+
+# ═══════════════════════════════════════════════════════════════
+# Section 4: Smart Flag Builder
+# ═══════════════════════════════════════════════════════════════
+
+echo ""
+echo "─── Configuring flags ───"
+
+# ── Context shift: crashes on hybrid SSM/Mamba models ──
+CONTEXT_SHIFT_FLAG=""
+if (( HAS_SSM == 1 )); then
+    CONTEXT_SHIFT_FLAG="--no-context-shift"
+    echo "  SSM/Mamba hybrid → context-shift disabled"
+fi
+
+# ── Compute totals for decisions ──
+TOTAL_VRAM_MB=0
+BEST_GPU_VRAM=0
+for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+    (( TOTAL_VRAM_MB += GPU_VRAM_FREE[$i] )) || true
+    (( GPU_VRAM_FREE[$i] > BEST_GPU_VRAM )) && BEST_GPU_VRAM=${GPU_VRAM_FREE[$i]}
+done
+
+FITS_ON_GPU=0
+(( TOTAL_SIZE_MB * 130 / 100 <= TOTAL_VRAM_MB )) && FITS_ON_GPU=1
+
+# Free RAM after model is loaded (estimate: model goes to VRAM if it fits, else spills)
+if (( FITS_ON_GPU )); then
+    RAM_AFTER_LOAD=$RAM_AVAIL_MB
+else
+    RAM_ON_CPU=$(( TOTAL_SIZE_MB - TOTAL_VRAM_MB ))
+    (( RAM_ON_CPU < 0 )) && RAM_ON_CPU=0
+    RAM_AFTER_LOAD=$(( RAM_AVAIL_MB - RAM_ON_CPU ))
+    (( RAM_AFTER_LOAD < 0 )) && RAM_AFTER_LOAD=0
+fi
+
+# ── Batch sizes: scale with available VRAM ──
+# Larger batches = faster prompt processing but use more VRAM
+# Small models with lots of VRAM headroom → max batches
+# Large models barely fitting → conservative batches
+if (( FITS_ON_GPU && BEST_GPU_VRAM > TOTAL_SIZE_MB + 4096 )); then
+    # Tons of VRAM headroom
+    BATCH=8192; UBATCH=1024
+    echo "  VRAM headroom large → batch=$BATCH ubatch=$UBATCH"
+elif (( FITS_ON_GPU )); then
+    BATCH=4096; UBATCH=512
+    echo "  Model fits on GPU → batch=$BATCH ubatch=$UBATCH"
+else
+    # MoE offload / CPU spill — GPU VRAM is tight
+    BATCH=2048; UBATCH=512
+    echo "  GPU+CPU split → batch=$BATCH ubatch=$UBATCH"
+fi
+
+# ── KV cache type: use q8_0 if VRAM allows, q4_0 otherwise ──
+# q8_0 is ~2x bigger but noticeably better quality for long contexts
+# KV cache size estimate: ctx * layers * kv_heads * (key+val) * bytes_per_element / 1MB
+if (( HEAD_COUNT_KV > 0 && KEY_LENGTH > 0 && VALUE_LENGTH > 0 )); then
+    KV_Q4_MB=$(awk "BEGIN {printf \"%.0f\", $CTX_SIZE * $LAYER_COUNT * $HEAD_COUNT_KV * ($KEY_LENGTH + $VALUE_LENGTH) * 0.5 / 1048576}")
+    KV_Q8_MB=$(awk "BEGIN {printf \"%.0f\", $CTX_SIZE * $LAYER_COUNT * $HEAD_COUNT_KV * ($KEY_LENGTH + $VALUE_LENGTH) * 1.0 / 1048576}")
+else
+    KV_Q4_MB=$(( LAYER_COUNT * 70 ))
+    KV_Q8_MB=$(( LAYER_COUNT * 140 ))
+fi
+
+KV_TYPE="q4_0"
+if (( FITS_ON_GPU )); then
+    # Check if q8_0 KV cache fits with the model in VRAM
+    VRAM_WITH_Q8=$(( TOTAL_SIZE_MB * 130 / 100 + KV_Q8_MB ))
+    if (( VRAM_WITH_Q8 < TOTAL_VRAM_MB )); then
+        KV_TYPE="q8_0"
+        echo "  VRAM sufficient for q8_0 KV cache (${KV_Q8_MB}MB) → better quality"
+    else
+        echo "  KV cache: q4_0 (${KV_Q4_MB}MB) — q8_0 wouldn't fit"
+    fi
+else
+    # For offload: check if RAM can handle q8_0
+    if (( RAM_AFTER_LOAD > KV_Q8_MB + 8192 )); then
+        KV_TYPE="q8_0"
+        echo "  RAM sufficient for q8_0 KV cache (${KV_Q8_MB}MB) → better quality"
+    else
+        echo "  KV cache: q4_0 (${KV_Q4_MB}MB) — RAM too tight for q8_0"
+    fi
+fi
+
+# ── Hadamard K-cache: only useful with quantized KV cache ──
+KHAD_FLAG=""
+if [[ "$KV_TYPE" == "q4_0" || "$KV_TYPE" == "q8_0" ]]; then
+    KHAD_FLAG="-khad"
+    echo "  Quantized KV cache → Hadamard K-transform enabled"
+fi
+
+# ── Prompt cache: scale with free RAM, cap at 10% ──
+CRAM_MB=$(( RAM_AFTER_LOAD / 10 ))
+(( CRAM_MB > 16384 )) && CRAM_MB=16384  # cap at 16GB
+(( CRAM_MB < 512 )) && CRAM_MB=0        # disable if <512MB
+if (( CRAM_MB > 0 )); then
+    echo "  Prompt cache: ${CRAM_MB}MB (10% of free RAM)"
+else
+    echo "  Prompt cache: disabled (not enough free RAM)"
+fi
+
+# ── Context size: auto-reduce if model barely fits ──
+ACTUAL_CTX=$CTX_SIZE
+# (context reduction happens later in RAM safety check for MoE offload)
+
+# ── Thread count ──
+# threads: physical cores for generation (hyperthreads hurt)
+# threads-batch: can use all cores for prompt processing (parallel work)
+THREADS_GEN=$PHYSICAL_CORES
+THREADS_BATCH=$PHYSICAL_CORES
+echo "  Threads: gen=$THREADS_GEN batch=$THREADS_BATCH (${PHYSICAL_CORES} physical cores)"
+
+# ── Build the flags array ──
+COMMON_FLAGS=(
+    -m "$MODEL_PATH"
+    --host "$HOST"
+    --port "$PORT"
+    --ctx-size "$CTX_SIZE"
+    # Attention
+    --flash-attn on
+    -mqkv
+    # Batch sizes (dynamic)
+    -b "$BATCH"
+    -ub "$UBATCH"
+    # Tensor optimization
+    --run-time-repack
+    # KV cache (dynamic type)
+    --cache-type-k "$KV_TYPE"
+    --cache-type-v "$KV_TYPE"
+    --defrag-thold 0.1
+    # Server
+    --jinja
+    --threads "$THREADS_GEN"
+    --threads-batch "$THREADS_BATCH"
+)
+
+# Conditional flags
+[[ -n "$KHAD_FLAG" ]] && COMMON_FLAGS+=("$KHAD_FLAG")
+[[ -n "$CONTEXT_SHIFT_FLAG" ]] && COMMON_FLAGS+=("$CONTEXT_SHIFT_FLAG")
+(( CRAM_MB > 0 )) && COMMON_FLAGS+=(-cram "$CRAM_MB")
+
+# MoE-specific optimizations
+if (( IS_MOE == 1 )); then
+    COMMON_FLAGS+=(-muge)           # merge up/gate expert tensors
+    COMMON_FLAGS+=(-ger)            # grouped expert routing
+    echo "  MoE model → -muge -ger enabled"
+fi
+
+# GPU flags
+if (( GPU_COUNT > 0 )); then
+    COMMON_FLAGS+=(-ngl 999)
+    if (( GPU_COUNT > 1 )); then
+        COMMON_FLAGS+=(-mg "${GPU_INDEX[${GPU_ORDER[0]}]}" --split-mode layer)
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════
+# Section 5: Strategy Selection
+# ═══════════════════════════════════════════════════════════════
+
+VRAM_NEEDED_MB=$(awk "BEGIN {printf \"%.0f\", $TOTAL_SIZE_MB * 1.3}")
+
+choose_strategy() {
+    # CPU-only
+    if (( GPU_COUNT == 0 )); then
+        echo "cpu_only"
+        return
+    fi
+
+    # Single GPU: model + overhead fits in best GPU
+    local best=${GPU_ORDER[0]}
+    if (( VRAM_NEEDED_MB <= GPU_VRAM_FREE[best] )); then
+        echo "single_gpu"
+        return
+    fi
+
+    # Multi-GPU: model fits across all GPUs
+    if (( IS_MOE == 0 && VRAM_NEEDED_MB <= TOTAL_VRAM_MB )); then
+        echo "multi_gpu_dense"
+        return
+    fi
+
+    # MoE expert offload
+    if (( IS_MOE == 1 )); then
+        echo "moe_offload"
+        return
+    fi
+
+    # Dense model with CPU spill
+    echo "dense_cpu_offload"
+}
+
+STRATEGY=$(choose_strategy)
+echo ""
+echo "Strategy: $STRATEGY"
+
+# ═══════════════════════════════════════════════════════════════
+# Section 6: Helper Functions
+# ═══════════════════════════════════════════════════════════════
+
+# Build -ot string from array of (cuda_device, layer_start, layer_count) assignments
+# Args: pairs of "CUDA_INDEX LAYER_START LAYER_COUNT" followed by end marker
+build_ot_string() {
+    local parts=()
+    while [[ $# -ge 3 ]]; do
+        local cuda_idx=$1 layer_start=$2 layer_count=$3
+        shift 3
+        if (( layer_count > 0 )); then
+            local last=$(( layer_start + layer_count - 1 ))
+            local re=$(seq "$layer_start" "$last" | tr '\n' '|' | sed 's/|$//')
+            parts+=("blk\\.(${re})\\.ffn_(gate|up|down)_exps.*=CUDA${cuda_idx}")
+        fi
+    done
+    parts+=("exps=CPU")
+    local IFS=,
+    echo "${parts[*]}"
+}
+
+kill_server() {
+    local pid=${1:-}
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null || true
+    fi
+    local port_pids
+    port_pids=$(lsof -t -i:"${PORT}" 2>/dev/null) || true
+    if [[ -n "$port_pids" ]]; then
+        kill -9 $port_pids 2>/dev/null || true
+    fi
+    local w=0
+    while (( w < 10 )); do
+        lsof -i:"${PORT}" >/dev/null 2>&1 || break
+        sleep 1; (( w++ ))
+    done
+    sleep 2
+}
+
+# Try starting server, wait for health. Sets RUNNING_PID on success.
+RUNNING_PID=""
+try_start() {
+    local extra_flags=("$@")
+    RUNNING_PID=""
+    "$LLAMA_SERVER" "${COMMON_FLAGS[@]}" "${extra_flags[@]}" >"$SERVER_LOG" 2>&1 &
+    local pid=$!
+    local i=0
+    while (( i < 240 )); do
+        if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+            RUNNING_PID=$pid
+            return 0
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 1
+        fi
+        sleep 1; (( i++ ))
+    done
+    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    return 1
+}
+
+print_cmd() {
+    echo ""
+    echo "Command:"
+    echo "  $LLAMA_SERVER \\"
+    local args=("$@")
+    for (( i=0; i<${#args[@]}; i++ )); do
+        if (( i == ${#args[@]} - 1 )); then
+            echo "    ${args[$i]}"
+        else
+            echo "    ${args[$i]} \\"
+        fi
+    done
+}
+
+# Run benchmark: send a prompt, measure tok/s
+run_benchmark() {
+    local url="http://127.0.0.1:${PORT}"
+    echo ""
+    echo "═══ Benchmark ═══"
+
+    # Prompt processing benchmark (short prompt)
+    local pp_prompt="Explain the theory of relativity in simple terms. Cover special and general relativity, time dilation, and gravitational effects."
+    local result
+    result=$(curl -sf "$url/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"$pp_prompt\"}],\"max_tokens\":200,\"temperature\":0.1}" 2>/dev/null)
+
+    if [[ -z "$result" ]]; then
+        echo "Benchmark failed — server not responding"
+        return 1
+    fi
+
+    local pp_tokens pp_time tg_tokens tg_time
+    pp_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); u=d.get('usage',{}); print(u.get('prompt_tokens',0))" 2>/dev/null)
+    tg_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); u=d.get('usage',{}); print(u.get('completion_tokens',0))" 2>/dev/null)
+
+    # Use timings endpoint if available (ik_llama.cpp / llama.cpp specific)
+    local timings
+    timings=$(curl -sf "$url/slots" 2>/dev/null)
+    if [[ -n "$timings" ]]; then
+        local pp_rate tg_rate
+        pp_rate=$(echo "$timings" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+s=d[0] if isinstance(d,list) else d
+print(f\"{s.get('t_prompt_processing',0)/max(s.get('n_prompt_tokens_processed',1),1)*1000:.1f}\")
+" 2>/dev/null)
+        tg_rate=$(echo "$timings" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+s=d[0] if isinstance(d,list) else d
+pp=s.get('n_prompt_tokens_processed',0)
+gen=s.get('n_decoded',0)
+t_gen=s.get('t_token_generation',1)
+print(f'{gen/max(t_gen,1)*1000:.1f}')
+" 2>/dev/null)
+        echo "  Prompt processing: ${pp_tokens:-?} tokens @ ${pp_rate:-?} tok/s"
+        echo "  Generation:        ${tg_tokens:-?} tokens @ ${tg_rate:-?} tok/s"
+    else
+        echo "  Prompt tokens: ${pp_tokens:-?}"
+        echo "  Generated tokens: ${tg_tokens:-?}"
+        echo "  (Install ik_llama.cpp for detailed timing)"
+    fi
+    echo ""
+}
+
+# Suggest alternatives when model doesn't fit
+suggest_alternatives() {
+    local model_mb=$1
+    local available_mb=$2
+    echo ""
+    echo "═══ Model doesn't fit ═══"
+    echo "  Model needs: ~${model_mb}MB (with overhead)"
+    echo "  Available:   ~${available_mb}MB (GPU + RAM)"
+    echo ""
+    echo "  Options:"
+    echo "  1. Use a smaller quantization (e.g., Q4 → IQ3, IQ3 → IQ2)"
+    echo "  2. Reduce context size: --ctx-size 16384 or --ctx-size 8192"
+    echo "  3. Use a smaller model (fewer parameters or MoE with fewer active)"
+    if (( GPU_COUNT > 0 )); then
+        echo "  4. Add more RAM (cheapest upgrade for MoE expert offload)"
+    else
+        echo "  4. Add a GPU (even a used RTX 3060 12GB helps significantly)"
+    fi
+    echo ""
+}
+
+# Run server with automatic crash restart and backoff
+# Args: all flags to pass to llama-server
+MAX_RESTARTS=5
+run_with_restart() {
+    local flags=("$@")
+    local restarts=0
+    local last_start=0
+
+    while true; do
+        last_start=$(date +%s)
+        echo "Starting server (PID will follow)..."
+        "$LLAMA_SERVER" "${flags[@]}" 2>&1 | tee "$SERVER_LOG" &
+        local pid=$!
+        echo "Server PID: $pid"
+
+        # Wait for health before declaring success
+        local healthy=0
+        for i in $(seq 1 240); do
+            if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+                healthy=1
+                break
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+
+        if (( healthy )); then
+            echo "Server healthy."
+            if (( BENCHMARK )); then
+                run_benchmark
+                BENCHMARK=0  # only run once
+            fi
+            restarts=0  # reset counter on successful start
+            wait "$pid" 2>/dev/null || true
+            local exit_code=$?
+        else
+            echo "Server failed to become healthy."
+            kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+            local exit_code=1
+        fi
+
+        # Server exited — decide whether to restart
+        local uptime=$(( $(date +%s) - last_start ))
+
+        # Clean exit (signal 0 or SIGTERM)
+        if (( exit_code == 0 || exit_code == 143 )); then
+            echo "Server exited cleanly (code $exit_code). Not restarting."
+            exit 0
+        fi
+
+        restarts=$(( restarts + 1 ))
+        echo ""
+        echo "═══ Server crashed (exit code $exit_code, uptime ${uptime}s) ═══"
+        tail -5 "$SERVER_LOG" 2>/dev/null
+        echo ""
+
+        if (( restarts > MAX_RESTARTS )); then
+            echo "Too many restarts ($MAX_RESTARTS). Giving up."
+            echo "Check $SERVER_LOG for details."
+            exit 1
+        fi
+
+        # Backoff: 2s, 4s, 8s, 16s, 32s
+        local wait_sec=$(( 2 ** restarts ))
+        (( wait_sec > 30 )) && wait_sec=30
+
+        # If server ran for >60s, it was a runtime crash (not startup OOM)
+        # Reset backoff since the config itself works
+        if (( uptime > 60 )); then
+            wait_sec=2
+            restarts=1  # don't count long-running crashes against limit as harshly
+            echo "Runtime crash (ran ${uptime}s). Quick restart in ${wait_sec}s..."
+        else
+            echo "Startup crash. Restart $restarts/$MAX_RESTARTS in ${wait_sec}s..."
+        fi
+
+        sleep "$wait_sec"
+
+        # Clean up port before restart
+        kill_server ""
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Section 7: Execute Strategy
+# ═══════════════════════════════════════════════════════════════
+
+# Kill any existing server on this port
+kill_server ""
+
+case "$STRATEGY" in
+    cpu_only)
+        echo "Running on CPU only (no GPUs detected)"
+        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" -ngl 0 --no-mmap)
+        # Remove -ngl 999 if present
+        LAUNCH_FLAGS=("${LAUNCH_FLAGS[@]//-ngl 999/}")
+        if (( DRY_RUN )); then
+            print_cmd "${LAUNCH_FLAGS[@]}"
+            exit 0
+        fi
+        run_with_restart "${LAUNCH_FLAGS[@]}"
+        ;;
+
+    single_gpu)
+        local_best=${GPU_ORDER[0]}
+        echo "Model fits on GPU${GPU_INDEX[$local_best]} (${GPU_NAME[$local_best]})"
+        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}")
+        if (( DRY_RUN )); then
+            print_cmd "${LAUNCH_FLAGS[@]}"
+            exit 0
+        fi
+        run_with_restart "${LAUNCH_FLAGS[@]}"
+        ;;
+
+    multi_gpu_dense)
+        echo "Dense model split across $GPU_COUNT GPUs"
+        # Build tensor-split proportional to free VRAM weighted by bandwidth
+        total_weighted=0
+        for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+            (( total_weighted += GPU_VRAM_FREE[$i] * GPU_BANDWIDTH[$i] )) || true
+        done
+        TS=""
+        for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+            w=$(awk "BEGIN {printf \"%.2f\", ${GPU_VRAM_FREE[$i]} * ${GPU_BANDWIDTH[$i]} / $total_weighted}")
+            TS="${TS:+$TS,}$w"
+        done
+        echo "Tensor split: $TS"
+        # Row split parallelizes matmuls across GPUs (faster than layer split for dense models)
+        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --split-mode row --tensor-split "$TS")
+        if (( DRY_RUN )); then
+            print_cmd "${LAUNCH_FLAGS[@]}"
+            exit 0
+        fi
+        run_with_restart "${LAUNCH_FLAGS[@]}"
+        ;;
+
+    dense_cpu_offload)
+        echo "Dense model with CPU offload"
+        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --no-mmap)
+        if (( DRY_RUN )); then
+            print_cmd "${LAUNCH_FLAGS[@]}"
+            exit 0
+        fi
+        run_with_restart "${LAUNCH_FLAGS[@]}"
+        ;;
+
+    moe_offload)
+        # Falls through to the MoE tuning section below
+        ;;
+esac
+
+# ═══════════════════════════════════════════════════════════════
+# Section 8: MoE Expert Placement & Auto-Tuning
+# ═══════════════════════════════════════════════════════════════
+
+mkdir -p "$CACHE_DIR"
+CACHE_KEY=$(echo "${MODEL_NAME}_${TOTAL_SIZE_BYTES}" | md5sum | awk '{print $1}')
+CACHE_FILE="$CACHE_DIR/${CACHE_KEY}.conf"
+
+# Estimate per-layer expert size (~90% of model is experts in MoE)
+EXPERT_TOTAL_MB=$(awk "BEGIN {printf \"%.0f\", $TOTAL_SIZE_MB * 0.90}")
+EXPERT_PER_LAYER_MB=$(awk "BEGIN {printf \"%.0f\", $EXPERT_TOTAL_MB / $LAYER_COUNT}")
+echo "Expert size per layer: ~${EXPERT_PER_LAYER_MB}MB"
+
+# Total KV cache size (model-specific, used for VRAM budgeting)
+if [[ "$KV_TYPE" == "q8_0" ]]; then
+    KV_TOTAL_MB=$KV_Q8_MB
+else
+    KV_TOTAL_MB=$KV_Q4_MB
+fi
+
+# Check cached config
+if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" ]]; then
+    echo ""
+    echo "Using cached config: $CACHE_FILE"
+    source "$CACHE_FILE"
+
+    # Validate cached config against current VRAM
+    CACHE_VALID=1
+    OT_ARGS=()
+    for assignment in $CACHED_GPU_ASSIGNMENTS; do
+        IFS=: read -r ci cs cc <<< "$assignment"
+        OT_ARGS+=("$ci" "$cs" "$cc")
+        # Check this GPU has enough VRAM for assigned layers + its share of KV cache
+        layer_mb=$(( cc * EXPERT_PER_LAYER_MB ))
+        kv_share_mb=$(( KV_TOTAL_MB * cc / LAYER_COUNT + 512 ))  # proportional KV + compute
+        needed=$(( layer_mb + kv_share_mb ))
+        # Find free VRAM for this CUDA index
+        for gi in $(seq 0 $(( GPU_COUNT - 1 ))); do
+            if [[ "${GPU_INDEX[$gi]}" == "$ci" ]]; then
+                if (( needed > GPU_VRAM_FREE[$gi] )); then
+                    echo "  WARNING: GPU${ci} needs ${needed}MB but only ${GPU_VRAM_FREE[$gi]}MB free"
+                    CACHE_VALID=0
+                fi
+                break
+            fi
+        done
+        echo "  GPU${ci}: ${cc} layers (starting at block ${cs})"
+    done
+
+    if (( CACHE_VALID )); then
+        OT_STRING=$(build_ot_string "${OT_ARGS[@]}")
+        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --no-mmap -ot "$OT_STRING")
+        if (( DRY_RUN )); then
+            print_cmd "${LAUNCH_FLAGS[@]}"
+            exit 0
+        fi
+        run_with_restart "${LAUNCH_FLAGS[@]}"
+    else
+        echo "  Cached config invalid for current VRAM — retuning..."
+        rm -f "$CACHE_FILE"
+    fi
+fi
+
+# Calculate initial conservative placement
+# Budget: GPUs get decreasing % based on priority (fastest gets most headroom for compute)
+# Reserve VRAM on primary GPU for KV cache + batch buffers + compute scratch
+declare -a LAYERS_PER_GPU
+BUDGET_PCTS=(70 55 50 45 40 35 30 25)  # Decreasing budget for lower-priority GPUs
+NEXT_LAYER=0
+TOTAL_GPU_LAYERS=0
+
+# Per-GPU VRAM budget: subtract proportional KV cache + compute overhead per layer
+# KV cache is split across GPUs proportionally to layers placed on each
+# Formula: each layer on a GPU costs EXPERT_PER_LAYER_MB + KV_PER_LAYER_MB + compute
+KV_PER_LAYER_MB=$(( KV_TOTAL_MB / LAYER_COUNT ))
+COMPUTE_PER_GPU_MB=512  # compute buffers + CUDA context per GPU
+COST_PER_LAYER_MB=$(( EXPERT_PER_LAYER_MB + KV_PER_LAYER_MB ))
+echo "  Per-layer cost: ${EXPERT_PER_LAYER_MB}MB experts + ${KV_PER_LAYER_MB}MB KV = ${COST_PER_LAYER_MB}MB"
+
+for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+    gi=${GPU_ORDER[$i]}
+    pct=${BUDGET_PCTS[$i]:-20}
+    available_mb=$(( GPU_VRAM_FREE[$gi] - COMPUTE_PER_GPU_MB ))
+    (( available_mb < 0 )) && available_mb=0
+    budget_mb=$(( available_mb * pct / 100 ))
+    layers=0
+    if (( COST_PER_LAYER_MB > 0 )); then
+        layers=$(( budget_mb / COST_PER_LAYER_MB ))
+    fi
+    # Cap to remaining layers
+    remain=$(( LAYER_COUNT - NEXT_LAYER ))
+    (( layers > remain )) && layers=$remain
+    LAYERS_PER_GPU[$gi]=$layers
+    NEXT_LAYER=$(( NEXT_LAYER + layers ))
+    TOTAL_GPU_LAYERS=$(( TOTAL_GPU_LAYERS + layers ))
+done
+
+LAYERS_CPU=$(( LAYER_COUNT - TOTAL_GPU_LAYERS ))
+
+# RAM safety check
+CPU_EXPERT_MB=$(( LAYERS_CPU * EXPERT_PER_LAYER_MB ))
+if (( HEAD_COUNT_KV > 0 && KEY_LENGTH > 0 && VALUE_LENGTH > 0 )); then
+    KV_CACHE_MB=$(awk "BEGIN {printf \"%.0f\", $CTX_SIZE * $LAYER_COUNT * $HEAD_COUNT_KV * ($KEY_LENGTH + $VALUE_LENGTH) * 0.5 / 1048576}")
+else
+    KV_CACHE_MB=$(( LAYER_COUNT * 70 ))
+fi
+RAM_NEEDED=$(( CPU_EXPERT_MB + KV_CACHE_MB + 5120 ))
+
+ACTUAL_CTX=$CTX_SIZE
+if (( RAM_NEEDED > RAM_AVAIL_MB )); then
+    for try_ctx in 32768 16384 8192 4096; do
+        kv_at_ctx=$(( KV_CACHE_MB * try_ctx / CTX_SIZE ))
+        needed=$(( CPU_EXPERT_MB + kv_at_ctx + 5120 ))
+        if (( needed <= RAM_AVAIL_MB )); then
+            echo "WARNING: Reducing context from $CTX_SIZE to $try_ctx to fit in RAM"
+            ACTUAL_CTX=$try_ctx
+            # Rebuild COMMON_FLAGS with new context
+            for idx in "${!COMMON_FLAGS[@]}"; do
+                [[ "${COMMON_FLAGS[$idx]}" == "--ctx-size" ]] && COMMON_FLAGS[$((idx+1))]="$ACTUAL_CTX"
+            done
+            break
+        fi
+    done
+fi
+
+# Build -ot string
+OT_ARGS=()
+NEXT_LAYER=0
+echo ""
+echo "Expert placement (conservative):"
+for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+    gi=${GPU_ORDER[$i]}
+    layers=${LAYERS_PER_GPU[$gi]}
+    if (( layers > 0 )); then
+        OT_ARGS+=("${GPU_INDEX[$gi]}" "$NEXT_LAYER" "$layers")
+        echo "  GPU${GPU_INDEX[$gi]} (${GPU_NAME[$gi]}): ${layers} layers (blk ${NEXT_LAYER}-$((NEXT_LAYER + layers - 1)))"
+        NEXT_LAYER=$(( NEXT_LAYER + layers ))
+    fi
+done
+echo "  CPU (RAM): ${LAYERS_CPU} layers (~${CPU_EXPERT_MB}MB)"
+
+OT_STRING=$(build_ot_string "${OT_ARGS[@]}")
+
+if (( DRY_RUN )); then
+    print_cmd "${COMMON_FLAGS[@]}" --no-mmap -ot "$OT_STRING"
+    exit 0
+fi
+
+# ── Auto-tuning loop ──
+echo ""
+echo "Starting server (conservative)..."
+if try_start --no-mmap -ot "$OT_STRING"; then
+    echo "  Server healthy (PID $RUNNING_PID)"
+    sleep 2
+
+    # Measure actual VRAM after load
+    echo "  Measuring VRAM headroom..."
+    declare -a ACTUAL_FREE
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        gi=${GPU_ORDER[$i]}
+        ACTUAL_FREE[$gi]=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "${GPU_INDEX[$gi]}" 2>/dev/null | tr -d ' ')
+        log "  GPU${GPU_INDEX[$gi]}: ${ACTUAL_FREE[$gi]}MB free after load"
+    done
+
+    # Calculate extra layers per GPU
+    # IMPORTANT: ACTUAL_FREE doesn't include KV cache yet (allocated on first prompt)
+    # Subtract current KV share per GPU before calculating extra capacity
+    SAFETY_MB=512
+    TOTAL_EXTRA=0
+    declare -a EXTRA_PER_GPU
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        gi=${GPU_ORDER[$i]}
+        extra=0
+        # Subtract KV cache that will be allocated for layers already on this GPU
+        current_kv=$(( LAYERS_PER_GPU[$gi] * KV_PER_LAYER_MB ))
+        usable_free=$(( ACTUAL_FREE[$gi] - current_kv - SAFETY_MB ))
+        (( usable_free < 0 )) && usable_free=0
+        if (( COST_PER_LAYER_MB > 0 )); then
+            extra=$(( usable_free / COST_PER_LAYER_MB ))
+        fi
+        (( extra < 0 )) && extra=0
+        EXTRA_PER_GPU[$gi]=$extra
+        (( TOTAL_EXTRA += extra ))
+    done
+
+    # Apply extras (priority order), cap to remaining CPU layers
+    if (( TOTAL_EXTRA > 0 && LAYERS_CPU > 0 )); then
+        remaining_cpu=$LAYERS_CPU
+        for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+            gi=${GPU_ORDER[$i]}
+            add=$(( EXTRA_PER_GPU[$gi] < remaining_cpu ? EXTRA_PER_GPU[$gi] : remaining_cpu ))
+            LAYERS_PER_GPU[$gi]=$(( LAYERS_PER_GPU[$gi] + add ))
+            remaining_cpu=$(( remaining_cpu - add ))
+            (( remaining_cpu <= 0 )) && break
+        done
+        LAYERS_CPU=$remaining_cpu
+        TOTAL_GPU_LAYERS=$(( LAYER_COUNT - LAYERS_CPU ))
+
+        # Rebuild -ot string with optimized placement
+        OT_ARGS=()
+        NEXT_LAYER=0
+        echo ""
+        echo "Optimized placement:"
+        for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+            gi=${GPU_ORDER[$i]}
+            layers=${LAYERS_PER_GPU[$gi]}
+            if (( layers > 0 )); then
+                OT_ARGS+=("${GPU_INDEX[$gi]}" "$NEXT_LAYER" "$layers")
+                echo "  GPU${GPU_INDEX[$gi]} (${GPU_NAME[$gi]}): ${layers} layers (blk ${NEXT_LAYER}-$((NEXT_LAYER + layers - 1)))"
+                NEXT_LAYER=$(( NEXT_LAYER + layers ))
+            fi
+        done
+        echo "  CPU (RAM): ${LAYERS_CPU} layers"
+
+        OT_STRING=$(build_ot_string "${OT_ARGS[@]}")
+
+        # Restart with optimized config
+        kill_server "$RUNNING_PID"
+        echo ""
+        echo "Restarting with optimized config..."
+        if ! try_start --no-mmap -ot "$OT_STRING"; then
+            echo "  Optimized config failed — falling back..."
+            # Reduce by 1 layer on primary GPU
+            primary=${GPU_ORDER[0]}
+            LAYERS_PER_GPU[$primary]=$(( LAYERS_PER_GPU[$primary] - 1 ))
+            LAYERS_CPU=$(( LAYERS_CPU + 1 ))
+
+            OT_ARGS=()
+            NEXT_LAYER=0
+            for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+                gi=${GPU_ORDER[$i]}
+                layers=${LAYERS_PER_GPU[$gi]}
+                if (( layers > 0 )); then
+                    OT_ARGS+=("${GPU_INDEX[$gi]}" "$NEXT_LAYER" "$layers")
+                    NEXT_LAYER=$(( NEXT_LAYER + layers ))
+                fi
+            done
+            OT_STRING=$(build_ot_string "${OT_ARGS[@]}")
+            kill_server ""
+            if ! try_start --no-mmap -ot "$OT_STRING"; then
+                echo "FAILED: Could not start server. Check $SERVER_LOG"
+                suggest_alternatives "$VRAM_NEEDED_MB" "$(( TOTAL_VRAM_MB + RAM_AVAIL_MB ))"
+                exit 1
+            fi
+        fi
+    else
+        echo "  Conservative config is already optimal (GPUs full)"
+    fi
+
+    # Save to cache
+    CACHED_GPU_ASSIGNMENTS=""
+    NEXT_LAYER=0
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        gi=${GPU_ORDER[$i]}
+        layers=${LAYERS_PER_GPU[$gi]}
+        if (( layers > 0 )); then
+            CACHED_GPU_ASSIGNMENTS+="${GPU_INDEX[$gi]}:${NEXT_LAYER}:${layers} "
+            NEXT_LAYER=$(( NEXT_LAYER + layers ))
+        fi
+    done
+
+    cat > "$CACHE_FILE" <<CEOF
+# Auto-tuned config for $MODEL_NAME
+# Generated: $(date)
+# Total layers: $LAYER_COUNT, Experts: $EXPERT_COUNT
+CACHED_GPU_ASSIGNMENTS="$CACHED_GPU_ASSIGNMENTS"
+CEOF
+
+    TOTAL_GPU_LAYERS=$(( LAYER_COUNT - LAYERS_CPU ))
+    echo ""
+    echo "═══════════════════════════════════════════"
+    echo "  Model: $MODEL_NAME"
+    echo "  Size: ${TOTAL_SIZE_GB}GB | Layers: $LAYER_COUNT | Experts: $EXPERT_COUNT"
+    echo "  GPU layers: $TOTAL_GPU_LAYERS | CPU layers: $LAYERS_CPU"
+    echo "  Context: $ACTUAL_CTX | Port: $PORT"
+    echo "  Config cached: $CACHE_FILE"
+    echo "═══════════════════════════════════════════"
+
+    # Kill the tuning server, restart via the crash-safe loop
+    kill_server "$RUNNING_PID"
+    run_with_restart "${COMMON_FLAGS[@]}" --no-mmap -ot "$OT_STRING"
+else
+    echo "FAILED: Could not start server even with conservative config."
+    echo "Check $SERVER_LOG for details."
+    tail -20 "$SERVER_LOG" 2>/dev/null
+    suggest_alternatives "$VRAM_NEEDED_MB" "$(( TOTAL_VRAM_MB + RAM_AVAIL_MB ))"
+    exit 1
+fi
