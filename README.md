@@ -6,6 +6,8 @@ Smart launcher for [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) and
 llm-server ~/ai_models/Qwen3.5-397B-A17B-UD-IQ3_XXS.gguf
 ```
 
+![demo](demo.gif)
+
 ## Features
 
 - **Smart Switcher** — Auto-detects fused `ffn_up_gate` tensors and switches to mainline `llama.cpp` to prevent `ik_llama.cpp` crashes.
