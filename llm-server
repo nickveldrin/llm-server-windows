@@ -10,6 +10,7 @@
 #   llm-server <model.gguf> --dry-run    # Print command without executing
 #   llm-server --port 8082 <model.gguf>  # Custom port
 #   llm-server <model.gguf> --benchmark  # Start, run quick benchmark, print tok/s
+#   llm-server <model.gguf> --cpu        # Force CPU-only (ignore GPUs)
 #
 # Environment variables:
 #   LLAMA_SERVER    Path to llama-server binary (auto-detected if not set)
@@ -35,6 +36,7 @@ RETUNE=0
 DRY_RUN=0
 VERBOSE=0
 BENCHMARK=0
+CPU_ONLY=0
 MODEL_ARG=""
 
 # Auto-detect llama-server binary
@@ -77,6 +79,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)   DRY_RUN=1; shift ;;
         --verbose)   VERBOSE=1; shift ;;
         --benchmark) BENCHMARK=1; shift ;;
+        --cpu)       CPU_ONLY=1; shift ;;
         --port)      PORT="$2"; shift 2 ;;
         --ctx-size)  CTX_SIZE="$2"; shift 2 ;;
         --model-dir) MODEL_DIR="$2"; shift 2 ;;
@@ -139,7 +142,9 @@ echo "RAM: ${RAM_AVAIL_MB}MB available / ${RAM_TOTAL_MB}MB total"
 GPU_COUNT=0
 declare -a GPU_INDEX GPU_NAME GPU_VRAM_TOTAL GPU_VRAM_FREE GPU_PCIE_WIDTH GPU_PCIE_GEN GPU_BANDWIDTH
 
-if command -v nvidia-smi &>/dev/null; then
+if (( CPU_ONLY )); then
+    echo "GPUs: skipped (--cpu flag)"
+elif command -v nvidia-smi &>/dev/null; then
     while IFS= read -r line; do
         # Parse comma-separated fields (name field may contain spaces)
         idx=$(echo "$line" | awk -F', ' '{print $1}')
@@ -709,10 +714,25 @@ kill_server ""
 
 case "$STRATEGY" in
     cpu_only)
-        echo "Running on CPU only (no GPUs detected)"
-        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" -ngl 0 --no-mmap)
-        # Remove -ngl 999 if present
-        LAUNCH_FLAGS=("${LAUNCH_FLAGS[@]//-ngl 999/}")
+        if (( CPU_ONLY )); then
+            echo "Running on CPU only (forced via --cpu)"
+        else
+            echo "Running on CPU only (no GPUs detected)"
+        fi
+        # CPU-optimized: smaller batches, no GPU flags, mlock for hugepages
+        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" -ngl 0 --no-mmap --mlock -b 512 -ub 256)
+        # Strip GPU-only flags from COMMON_FLAGS
+        clean_flags=()
+        skip_next=0
+        for f in "${LAUNCH_FLAGS[@]}"; do
+            if (( skip_next )); then skip_next=0; continue; fi
+            case "$f" in
+                -ngl|-mg|--split-mode|--tensor-split|-b|-ub) skip_next=1; continue ;;
+                --run-time-repack|-muge|-ger) continue ;;
+                *) clean_flags+=("$f") ;;
+            esac
+        done
+        LAUNCH_FLAGS=("${clean_flags[@]}" -ngl 0 -b 512 -ub 256)
         if (( DRY_RUN )); then
             print_cmd "${LAUNCH_FLAGS[@]}"
             exit 0

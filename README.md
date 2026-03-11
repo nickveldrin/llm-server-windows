@@ -21,6 +21,7 @@ That's it. It handles everything: GPU detection, MoE expert placement, KV cache 
 - **Config caching** — first run auto-tunes, subsequent runs start instantly
 - **SSM/Mamba hybrid support** — detects and disables incompatible features
 - **GGUF metadata parsing** — reads layer count, expert count, KV heads directly from model file
+- **CPU-only mode** — `--cpu` to force CPU-only inference (when GPUs are busy)
 - **Benchmark mode** — `--benchmark` to measure tok/s after startup
 - **Dry-run mode** — `--dry-run` to print the command without executing
 
@@ -65,6 +66,9 @@ llm-server --dry-run model.gguf
 # Start and run a quick benchmark
 llm-server --benchmark model.gguf
 
+# Force CPU-only (ignore GPUs)
+llm-server --cpu model.gguf
+
 # Model picker TUI
 llm-server-gui
 ```
@@ -85,7 +89,10 @@ llm-server-gui
 The script evaluates your hardware and model, then picks the best strategy:
 
 ```
-┌─ Model fits on single GPU?
+┌─ --cpu flag?
+│  └─ Yes → cpu_only (optimized: --mlock, smaller batches, no GPU flags)
+│
+├─ Model fits on single GPU?
 │  └─ Yes → single_gpu (all layers on fastest GPU)
 │
 ├─ Dense model fits across all GPUs?
