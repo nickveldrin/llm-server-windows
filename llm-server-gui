@@ -4,25 +4,62 @@
 # Lists available GGUF models and launches llm-server with the selected one.
 #
 # Usage:
-#   llm-server-gui                    # Select from ~/ai_models
+#   llm-server-gui                    # Select from configured model dir
 #   llm-server-gui --model-dir /path  # Custom model directory
-#   llm-server-gui --model /path/to/model.gguf  # Launch specific model directly
+#   llm-server-gui -h                 # Show this help message
 #
+# Environment:
+#   LLM_MODEL_DIR   Default search path
+#
+
 set -euo pipefail
+
+CONFIG_DIR="$HOME/.config/llm-server"
+CONFIG_FILE="$CONFIG_DIR/config.sh"
+mkdir -p "$CONFIG_DIR"
+
+# Load persistent config
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
 MODEL_DIR="${LLM_MODEL_DIR:-$HOME/ai_models}"
 SPECIFIC_MODEL=""
 LAUNCHER="$(dirname "$0")/llm-server"
 
+# Help flag
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '4,/^$/s/^# \?//p' "$0"
+    exit 0
+fi
+
 # Parse args (pass through to llm-server)
 PASSTHROUGH_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --model-dir) MODEL_DIR="$2"; PASSTHROUGH_ARGS+=("$1" "$2"); shift 2 ;;
+        --model-dir) MODEL_DIR="$2"; shift 2 ;;
         --model) SPECIFIC_MODEL="$2"; shift 2 ;;
         *)           PASSTHROUGH_ARGS+=("$1"); shift ;;
     esac
 done
+
+# First-run setup: If default dir is empty/missing, ask user
+if [[ ! -d "$MODEL_DIR" || -z "$(ls -A "$MODEL_DIR" 2>/dev/null)" ]]; then
+    echo "═══ llm-server First Run Setup ═══"
+    echo "No models found in: $MODEL_DIR"
+    echo ""
+    read -p "Enter the full path to your model directory: " USER_PATH
+    
+    # Expand tilde if present
+    USER_PATH="${USER_PATH/#\~/$HOME}"
+    
+    if [[ -d "$USER_PATH" ]]; then
+        echo "LLM_MODEL_DIR=\"$USER_PATH\"" > "$CONFIG_FILE"
+        MODEL_DIR="$USER_PATH"
+        echo "✓ Path saved to $CONFIG_FILE"
+    else
+        echo "Error: Directory not found: $USER_PATH"
+        exit 1
+    fi
+fi
 
 # If a specific model is provided, launch directly without TUI
 if [[ -n "$SPECIFIC_MODEL" ]]; then
