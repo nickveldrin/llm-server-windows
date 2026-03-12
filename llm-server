@@ -656,6 +656,7 @@ kill_server() {
         kill -9 "$pid" 2>/dev/null
         wait "$pid" 2>/dev/null || true
     fi
+    # Aggressive port cleanup
     local port_pids
     port_pids=$(lsof -t -i:"${PORT}" 2>/dev/null) || true
     if [[ -n "$port_pids" ]]; then
@@ -674,8 +675,8 @@ RUNNING_PID=""
 try_start() {
     local extra_flags=("$@")
     RUNNING_PID=""
-    # Use tee to show output to user while still capturing to log for health check
-    "$LLAMA_SERVER" "${COMMON_FLAGS[@]}" "${extra_flags[@]}" 2>&1 | tee -a "$SERVER_LOG" &
+    # Use process substitution to get the REAL pid of the server, not the tee pid
+    "$LLAMA_SERVER" "${COMMON_FLAGS[@]}" "${extra_flags[@]}" > >(tee -a "$SERVER_LOG") 2>&1 &
     local pid=$!
     local i=0
     while (( i < 240 )); do
