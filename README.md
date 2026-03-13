@@ -59,8 +59,17 @@ When you use `--download`, the script calculates your total available memory:
 `Total = System VRAM + System RAM`
 It then looks at the model repository and recommends the quantization level that will give you the best balance of speed and quality for your specific hardware.
 
+![download-demo](download-demo.gif)
+
 ### Native Fused Support
 Modern GGUF quants often "fuse" tensors (e.g., `ffn_up_gate`) for 10-20% faster processing. While these previously caused crashes on specialized backends, `llm-server` now detects these models and enables the optimized fused kernels in `ik_llama.cpp` automatically.
 
 ## License
 MIT
+
+---
+<p align="right">
+  <a href="https://www.buymeacoffee.com/raketenkater">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 32px !important;width: 116px !important;" >
+  </a>
+</p>
