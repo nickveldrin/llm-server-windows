@@ -52,152 +52,25 @@ def list_available_quantizations(repo):
         if not gguf_files:
             return []
 
-        # Extract quantization types
         import re
 
         quantizations = set()
 
-        # Pattern to match complete quantization names (not partial)
-        # Q4_K_M, Q4_K_S, Q4_K_L, Q5_K_M, Q6_K, Q8_K, IQ4_NL, IQ4_XS, etc.
+        # Comprehensive quantization pattern matching all GGUF formats (non-capturing groups)
         quant_pattern = re.compile(
-            r"(Q\d_K_[MSLX]+|Q\d_K|Q\d_[01]|IQ\d_[NLXS]+|MXFP4|MXP4|BF16|F16|F32)"
-        )
-
-        for f in gguf_files:
-            basename = f.split("/")[-1]
-            matches = quant_pattern.findall(basename)
-            for m in matches:
-                # Strip trailing dot if present
-                quantizations.add(m.upper().rstrip("."))
-
-        return sorted(quantizations, key=lambda x: x.lower())
-    except Exception as e:
-        print(f"Warning: Could not list quantizations: {e}")
-        return []
-
-        # Extract quantization types
-        import re
-
-        quantizations = set()
-
-        # Pattern to match common quantization formats
-        quant_pattern = re.compile(
-            r"(Q\d_[A-Z0-9]+|IQ\d_[A-Z]+|MXFP4|MXP4|BF16|F16|F32)"
-        )
-
-        for f in gguf_files:
-            basename = f.split("/")[-1]
-            matches = quant_pattern.findall(basename)
-            for m in matches:
-                quantizations.add(m.upper())
-
-        return sorted(quantizations, key=lambda x: x.lower())
-    except Exception as e:
-        print(f"Warning: Could not list quantizations: {e}")
-        return []
-
-        # Extract quantization types using regex for better detection
-        import re
-
-        quantizations = set()
-
-        # Comprehensive quantization pattern - simpler approach
-        quant_pattern = re.compile(
-            r"([A-Z]{2,5}\d+[_-][A-Z0-9_]+|Q\d[_-]?[K0-9][A-Z]?|IQ\d[_-][A-Z]+)",
-            re.IGNORECASE,
-        )
-
-        for f in gguf_files:
-            # Skip subdirectory paths for main files
-            basename = f.split("/")[-1]
-            matches = quant_pattern.findall(basename)
-            for match in matches:
-                # Clean up and normalize
-                match_clean = match.upper().replace("-", "_")
-                if match_clean in ["BF16", "F16", "F32", "F8", "I4"]:
-                    quantizations.add(match_clean)
-                elif re.match(r"^Q[2-9]_?K_?[A-Z]{1,3}$", match_clean) or re.match(
-                    r"^Q[2-9]_?[0]$|^[I][Q][2-9]_?[A-Z]{2}$", match_clean
-                ):
-                    quantizations.add(match_clean)
-
-        return sorted(quantizations, key=lambda x: x.lower())
-    except Exception as e:
-        print(f"Warning: Could not list quantizations: {e}")
-        return []
-
-        # Extract quantization types using regex for better detection
-        import re
-
-        quantizations = set()
-
-        # Comprehensive quantization pattern
-        quant_pattern = re.compile(
-            r"(IQ[2-8]_[NLXS]|Q[2-9]_(K_?(XL|XL_?M|L|S|M)|0|[1-9]_?[KS])|MXFP4|MXP4|BF16|F16|F32|F8|I4)",
+            r"(?:IQ[2-8]_[NLXS]|Q[2-9]_(?:K_?(?:XL|XL_?M|L|S|M)|0|[1-9]_?[KS])|MXFP4|MXP4|BF16|F16|F32|F8|I4)",
             re.IGNORECASE,
         )
 
         for f in gguf_files:
             matches = quant_pattern.findall(f)
+            # findall with non-capturing groups returns strings
             quantizations.update(matches)
 
-        return sorted(quantizations, key=lambda x: x.lower())
+        return sorted(quantizations, key=lambda x: x.upper())
     except Exception as e:
         print(f"Warning: Could not list quantizations: {e}")
         return []
-
-        # Extract quantization types using regex for better detection
-        import re
-
-        quantizations = set()
-
-        # Known quantization patterns
-        quant_pattern = re.compile(
-            r"(Q\d_[KS]_[MLSD]|Q\d_K_[XLMS]|Q\d_K_[XS]|MXFP4|MXP4|F16|F32|F8|I4)",
-            re.IGNORECASE,
-        )
-
-        for f in gguf_files:
-            matches = quant_pattern.findall(f)
-            quantizations.update(matches)
-
-        return sorted(quantizations, key=lambda x: x.lower())
-    except Exception as e:
-        print(f"Warning: Could not list quantizations: {e}")
-        return []
-
-
-def select_quantization(repo):
-    """Let user select quantization"""
-    print("\n🔍 Scanning repository for available quantizations...")
-
-    quantizations = list_available_quantizations(repo)
-
-    if not quantizations:
-        print("   No GGUF quantizations found, downloading all .gguf files")
-        return None
-
-    print(f"\nFound {len(quantizations)} quantization(s):")
-    for i, q in enumerate(quantizations, 1):
-        print(f"  {i}) {q}")
-
-    print("\nOr press Enter to download all GGUF files")
-    print()
-
-    while True:
-        choice = input("Select quantization (or leave empty for all): ").strip()
-
-        if not choice:
-            return None  # Download all
-
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < len(quantizations):
-                return quantizations[idx]
-        except ValueError:
-            pass
-
-        print("❌ Invalid selection. Please try again.\n")
 
 
 def get_model_files(repo, selected_quantization):
@@ -440,6 +313,7 @@ def print_quick_examples():
 
 import argparse
 
+
 def get_args():
     parser = argparse.ArgumentParser(description="Universal GGUF Downloader")
     parser.add_argument("--repo", type=str, help="HuggingFace repository")
@@ -448,17 +322,20 @@ def get_args():
     parser.add_argument("--ram", type=int, default=0, help="Available RAM in MB")
     return parser.parse_args()
 
+
 def recommend_quant(repo, vram_mb, ram_mb):
     """Recommend the best quantization based on hardware"""
     total_mb = vram_mb + ram_mb
-    
+
     # Heuristic for a "typical" 27B-35B model size (most common for power users)
     # We use bits-per-weight (bpw) to estimate
     # Q8_0 (~8.5 bpw), Q4_K_M (~4.8 bpw), IQ3_XXS (~3.1 bpw)
-    
-    print(f"\n🖥️  Hardware detected: {vram_mb/1024:.1f}GB VRAM | {ram_mb/1024:.1f}GB System RAM")
-    print(f"   Total Memory: {total_mb/1024:.1f}GB")
-    
+
+    print(
+        f"\n🖥️  Hardware detected: {vram_mb / 1024:.1f}GB VRAM | {ram_mb / 1024:.1f}GB System RAM"
+    )
+    print(f"   Total Memory: {total_mb / 1024:.1f}GB")
+
     if vram_mb > 48000:
         return "Q8_0", "High-End: Fits entirely in VRAM with maximum quality."
     elif vram_mb > 24000:
@@ -469,6 +346,7 @@ def recommend_quant(repo, vram_mb, ram_mb):
         return "Q3_K_M", "Efficiency: Fits in memory, prioritized for stability."
     else:
         return "IQ2_XXS", "Compatibility: Minimal size to run on this hardware."
+
 
 def select_quantization(repo, vram_mb=0, ram_mb=0):
     """Let user select quantization"""
@@ -510,6 +388,7 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
 
         print("❌ Invalid selection. Please try again.\n")
 
+
 def main():
     args = get_args()
     try:
@@ -518,7 +397,7 @@ def main():
 
         # Get repository
         repo = args.repo if args.repo else get_hf_repo()
-        
+
         # Select files to download
         selected_quantization = select_quantization(repo, args.vram, args.ram)
         files_to_download = get_model_files(repo, selected_quantization)

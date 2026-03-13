@@ -152,9 +152,9 @@ if (( DOWNLOAD )); then
     fi
     RAM_AVAIL_MB=$(grep MemAvailable /proc/meminfo | awk '{print int($2/1024)}')
     # Try finding the downloader in several places
-    DOWNLOADER="/home/mik/ai_models/download_any_gguf.py"
+    DOWNLOADER="$(dirname "$(readlink -f "$0")")/download_any_gguf.py"
     if [[ ! -f "$DOWNLOADER" ]]; then
-        DOWNLOADER="$(dirname "$(readlink -f "$0")")/download_any_gguf.py"
+        DOWNLOADER="$MODEL_DIR/download_any_gguf.py"
     fi
     
     if [[ ! -f "$DOWNLOADER" ]]; then
@@ -407,23 +407,24 @@ echo "Architecture: ${LAYER_COUNT} layers, $([ "$IS_MOE" = "1" ] && echo "${EXPE
 
 # ── Smart Switcher: Handle fused quants vs backend compatibility ──
 if (( HAS_FUSED == 1 )); then
-    if (( IS_IK_LLAMA == 1 )) && [[ -z "$USER_SERVER_BIN" ]]; then
-        # If we auto-detected ik_llama but model is fused, try switching to mainline
-        MAINLINE_FALLBACK="$HOME/llama.cpp/build/bin/llama-server"
-        if [[ -x "$MAINLINE_FALLBACK" ]]; then
-            echo "Warning: Fused model detected. Switching to mainline llama.cpp to prevent ik_llama.cpp crash."
-            LLAMA_SERVER="$MAINLINE_FALLBACK"
-            IS_IK_LLAMA=0
-            setup_lib_hub "$LLAMA_SERVER"
-        else
-            echo "CRITICAL WARNING: This model uses fused tensors (ffn_up_gate) which are currently BROKEN on ik_llama.cpp."
-            echo "Attempting to run anyway, but a crash is likely. Install mainline llama.cpp for this model."
-        fi
-    elif (( IS_IK_LLAMA == 1 )); then
-        # User explicitly provided ik_llama binary via flag
-        echo "CRITICAL WARNING: Fused model detected. ik_llama.cpp will likely crash."
-        echo "If it fails, use --server-bin to point to a mainline llama.cpp build."
+    if (( IS_IK_LLAMA == 1 )); then
+        echo "Info: Fused up|gate model detected. Optimized ik_llama.cpp kernels enabled."
     fi
+fi
+
+# ── Memory Safety Check ──
+TOTAL_MEM_MB=$(( TOTAL_VRAM_MB + RAM_AVAIL_MB ))
+# Estimate KV cache based on ctx size and model layers (rough proxy for memory overhead)
+KV_EST_MB=$(( CTX_SIZE * LAYER_COUNT / 1024 )) 
+ESTIMATED_TOTAL_NEEDED=$(( TOTAL_SIZE_MB + KV_EST_MB + 5120 )) # Model + KV + 5GB system headroom
+
+if (( TOTAL_SIZE_MB > TOTAL_MEM_MB )); then
+    echo "CRITICAL ERROR: Model (${TOTAL_SIZE_GB}GB) is larger than your total memory (${TOTAL_MEM_MB}MB)."
+    echo "This will cause a system crash. Please use a smaller quantization."
+    exit 1
+elif (( ESTIMATED_TOTAL_NEEDED > TOTAL_MEM_MB )); then
+    echo "WARNING: Model + KV Cache (~${ESTIMATED_TOTAL_NEEDED}MB) is very close to your total memory (${TOTAL_MEM_MB}MB)."
+    echo "Expect potential instability or slow swap performance."
 fi
 
 # ═══════════════════════════════════════════════════════════════
