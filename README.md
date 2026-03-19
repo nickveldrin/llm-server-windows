@@ -16,6 +16,8 @@ llm-server unsloth/Qwen3.5-27B-GGUF --download
 - **Native Fused Support** — Full compatibility with fused `ffn_up_gate` models (e.g., AesSedai) using high-performance `ik_llama.cpp` kernels.
 - **Lib Hub** — Automatically symlinks all required `.so` libraries into a temporary directory, solving library path issues.
 - **Auto GPU detection** — works with 0 to 8+ GPUs, any mix of NVIDIA cards.
+- **GPU selection** — `--gpus 0,1` restricts the instance to specific GPUs, enabling multi-instance usage (e.g. 397B on GPUs 0+1, small model on GPU 2).
+- **RAM budget** — `--ram-budget 60G` caps RAM usage so multiple instances can coexist without OOM.
 - **Split Mode Graph** — Automatically enables `-sm graph` for both `ik_llama.cpp` and mainline for superior multi-GPU scaling.
 - **Heterogeneous GPU support** — different VRAM sizes, different PCIe bandwidths, properly weighted.
 - **MoE expert auto-placement** — starts conservative, measures actual VRAM usage, optimizes, caches for instant next startup.
@@ -60,6 +62,10 @@ llm-server --server-bin /path/to/llama-server model.gguf
 
 # Start and run a quick benchmark (auto-exits)
 llm-server --benchmark model.gguf
+
+# Multi-instance: big model on GPUs 0+1, small model on GPU 2
+llm-server big-model.gguf --gpus 0,1 --port 8081 --ram-budget 90G
+llm-server small-model.gguf --gpus 2 --port 8082 --ram-budget 30G
 ```
 
 ## How It Works
