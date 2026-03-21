@@ -65,7 +65,7 @@ CPU_ONLY=0
 MODEL_ARG=""
 USER_SERVER_BIN=""
 USER_LIB_PATH=""
-KV_QUALITY="mid"  # high (f16), mid (q8_0, default), low (q4_0)
+KV_QUALITY="low"  # high (f16), mid (q8_0), low (q4_0, default)
 GPUS_FILTER=""
 RAM_BUDGET_MB=0
 
@@ -634,6 +634,13 @@ case "$KV_QUALITY" in
         ;;
 esac
 
+# Set KV_TOTAL_MB based on selected type (needed for OOM checks in all strategies)
+case "$KV_TYPE" in
+    f16)   KV_TOTAL_MB=$KV_F16_MB ;;
+    q8_0)  KV_TOTAL_MB=$KV_Q8_MB ;;
+    q4_0)  KV_TOTAL_MB=$KV_Q4_MB ;;
+esac
+
 # ── Hadamard K-cache: only useful with quantized KV cache ──
 KHAD_FLAG=""
 if [[ "$KV_TYPE" == "q4_0" || "$KV_TYPE" == "q8_0" ]]; then
@@ -645,10 +652,12 @@ fi
 CRAM_MB=$(( RAM_AFTER_LOAD / 10 ))
 (( CRAM_MB > 16384 )) && CRAM_MB=16384  # cap at 16GB
 (( CRAM_MB < MIN_CRAM_MB )) && CRAM_MB=0  # disable if too small
-if (( CRAM_MB > 0 )); then
-    echo "  Prompt cache: ${CRAM_MB}MB (10% of free RAM)"
-else
-    echo "  Prompt cache: disabled (not enough free RAM)"
+if (( GPU_COUNT <= 1 )); then
+    if (( CRAM_MB > 0 )); then
+        echo "  Prompt cache: ${CRAM_MB}MB (10% of free RAM)"
+    else
+        echo "  Prompt cache: disabled (not enough free RAM)"
+    fi
 fi
 
 # ── Thread count ──
@@ -683,18 +692,43 @@ if [[ "$IS_IK_LLAMA" == "1" ]]; then
     COMMON_FLAGS+=(--run-time-repack)
     [[ -n "$KHAD_FLAG" ]] && COMMON_FLAGS+=("$KHAD_FLAG")
     [[ -n "$CONTEXT_SHIFT_FLAG" ]] && COMMON_FLAGS+=("$CONTEXT_SHIFT_FLAG")
-    (( CRAM_MB > 0 )) && COMMON_FLAGS+=(-cram "$CRAM_MB")
     COMMON_FLAGS+=(--defrag-thold 0.1)
-    
+
     # MoE-specific optimizations
     if (( IS_MOE == 1 )); then
         COMMON_FLAGS+=(-muge)           # merge up/gate expert tensors
         COMMON_FLAGS+=(-ger)            # grouped expert routing
         echo "  MoE model → -muge -ger enabled"
     fi
-    
+
     if (( GPU_COUNT > 0 )); then
         COMMON_FLAGS+=(-mqkv)
+    fi
+
+    # ── Prompt cache budget ──
+    # Multi-GPU: checkpoints can OOM smaller GPUs (cuBLAS workspace fails silently).
+    # Cap based on VRAM headroom after model+KV+compute.
+    # Single-GPU / CPU-only: use RAM-based default (CRAM_MB from above).
+    if (( GPU_COUNT > 1 )); then
+        MODEL_ON_GPU_MB=$(( TOTAL_SIZE_MB * VRAM_OVERHEAD_PERCENT / 100 ))
+        (( MODEL_ON_GPU_MB > TOTAL_VRAM_MB )) && MODEL_ON_GPU_MB=$TOTAL_VRAM_MB
+        VRAM_HEADROOM=$(( TOTAL_VRAM_MB - MODEL_ON_GPU_MB - KV_TOTAL_MB - COMPUTE_PER_GPU_MB * GPU_COUNT ))
+        (( VRAM_HEADROOM < 0 )) && VRAM_HEADROOM=0
+        CACHE_RAM_MB=$(( VRAM_HEADROOM / 2 ))
+        (( CACHE_RAM_MB > 4096 )) && CACHE_RAM_MB=4096
+        if (( CACHE_RAM_MB < 256 )); then
+            CACHE_RAM_MB=0
+            MAX_CHECKPOINTS=0
+            COMMON_FLAGS+=(-cram 0 --ctx-checkpoints 0)
+        else
+            MAX_CHECKPOINTS=$(( CACHE_RAM_MB / 200 ))
+            (( MAX_CHECKPOINTS < 2 )) && MAX_CHECKPOINTS=2
+            (( MAX_CHECKPOINTS > 16 )) && MAX_CHECKPOINTS=16
+            COMMON_FLAGS+=(-cram "$CACHE_RAM_MB" --ctx-checkpoints "$MAX_CHECKPOINTS")
+        fi
+        echo "  Prompt cache: ${CACHE_RAM_MB}MB (VRAM headroom: ${VRAM_HEADROOM}MB), checkpoints: ${MAX_CHECKPOINTS}"
+    else
+        (( CRAM_MB > 0 )) && COMMON_FLAGS+=(-cram "$CRAM_MB")
     fi
 else
     # Mainline-specific or compatible flags
@@ -710,7 +744,50 @@ fi
 # Section 5: Strategy Selection
 # ═══════════════════════════════════════════════════════════════
 
-VRAM_NEEDED_MB=$(( TOTAL_SIZE_MB * VRAM_OVERHEAD_PERCENT / 100 ))
+# OOM guard: refuse to launch if model+KV+compute don't fit in the given memory pool
+# Args: pool_mb pool_label
+check_memory_or_die() {
+    local pool_mb=$1
+    local pool_label=$2
+    local model_overhead_mb=$(( TOTAL_SIZE_MB * VRAM_OVERHEAD_PERCENT / 100 ))
+    local needed_mb=$(( model_overhead_mb + KV_TOTAL_MB + COMPUTE_PER_GPU_MB ))
+
+    if (( needed_mb > pool_mb )); then
+        # Back-solve max safe context: max_kv = pool - model_overhead - compute
+        local max_kv_mb=$(( pool_mb - model_overhead_mb - COMPUTE_PER_GPU_MB ))
+        (( max_kv_mb < 0 )) && max_kv_mb=0
+        local max_ctx=0
+        if (( KV_TOTAL_MB > 0 )); then
+            max_ctx=$(( max_kv_mb * CTX_SIZE / KV_TOTAL_MB ))
+        fi
+        echo ""
+        echo "ERROR: Model does not fit in ${pool_label}."
+        echo "  Model (with overhead): ${model_overhead_mb}MB"
+        echo "  KV cache (ctx=${CTX_SIZE}): ${KV_TOTAL_MB}MB"
+        echo "  Compute buffers:       ${COMPUTE_PER_GPU_MB}MB"
+        echo "  ─────────────────────────────"
+        echo "  Total needed:          ${needed_mb}MB"
+        echo "  Available (${pool_label}): ${pool_mb}MB"
+        echo "  Shortfall:             $(( needed_mb - pool_mb ))MB"
+        echo ""
+        if (( max_ctx > 0 )); then
+            echo "  Max safe context at this memory: --ctx-size $max_ctx"
+        else
+            echo "  Model weights alone exceed available memory."
+        fi
+        echo "  Or use a smaller quantization / model."
+        exit 1
+    fi
+}
+
+VRAM_NEEDED_MB=$(( TOTAL_SIZE_MB * VRAM_OVERHEAD_PERCENT / 100 + KV_TOTAL_MB + COMPUTE_PER_GPU_MB ))
+
+# Global OOM check: model must fit somewhere (all GPUs + RAM combined)
+# Skip for MoE — expert offload has its own fine-grained budgeting (Phase 1+2)
+if (( IS_MOE == 0 )); then
+    TOTAL_POOL_MB=$(( TOTAL_VRAM_MB + RAM_AVAIL_MB - SYSTEM_HEADROOM_MB ))
+    check_memory_or_die "$TOTAL_POOL_MB" "total GPU+RAM"
+fi
 
 choose_strategy() {
     # CPU-only
@@ -720,8 +797,11 @@ choose_strategy() {
     fi
 
     # Single GPU: model + overhead fits in best GPU
+    # Use tighter estimate (110%) — quantized weights don't expand much in VRAM,
+    # and 130% global overhead is too conservative for single-GPU feasibility
     local best=${GPU_ORDER[0]}
-    if (( VRAM_NEEDED_MB <= GPU_VRAM_FREE[best] )); then
+    local single_gpu_needed=$(( TOTAL_SIZE_MB * 110 / 100 + KV_TOTAL_MB + COMPUTE_PER_GPU_MB ))
+    if (( single_gpu_needed <= GPU_VRAM_FREE[best] )); then
         echo "single_gpu"
         return
     fi
@@ -909,6 +989,8 @@ run_with_restart() {
 
     while true; do
         last_start=$(date +%s)
+        local log_start
+        log_start=$(wc -c < "$SERVER_LOG" 2>/dev/null || echo 0)
         echo "Starting server..."
         "$LLAMA_SERVER" "${flags[@]}" > >(tee -a "$SERVER_LOG" | grep -v --line-buffered "record AND rewind is invalid") 2>&1 &
         local pid=$!
@@ -934,7 +1016,48 @@ run_with_restart() {
                 BENCHMARK=0  # only run once
             fi
             restarts=0  # reset counter on successful start
+
+            # Monitor log for CUDA errors — server stays "alive" but braindead after these
+            local cuda_killed=0
+            local log_pos=$log_start
+            while kill -0 "$pid" 2>/dev/null; do
+                sleep 5
+                if tail -c +"$log_pos" "$SERVER_LOG" 2>/dev/null | grep -q "CUDA error"; then
+                    echo ""
+                    echo "═══ CUDA error detected — server is braindead, killing ═══"
+                    tail -5 "$SERVER_LOG" 2>/dev/null
+                    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+                    cuda_killed=1
+                    break
+                fi
+                log_pos=$(wc -c < "$SERVER_LOG" 2>/dev/null || echo "$log_pos")
+            done
+
             local exit_code=0
+            if (( cuda_killed )); then
+                # CUDA kill is a recovery, not a repeated crash — don't count against restarts
+                echo "Restarting after CUDA error recovery..."
+                kill_server ""
+                # Wait for GPU driver to fully reclaim CUDA contexts (up to 60s)
+                local gpu_wait=0
+                echo "Waiting for GPU memory to be released..."
+                while (( gpu_wait < 60 )); do
+                    local gpu_procs
+                    gpu_procs=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c '[0-9]') || gpu_procs=0
+                    if (( gpu_procs == 0 )); then
+                        echo "GPU memory free after ${gpu_wait}s"
+                        break
+                    fi
+                    sleep 2
+                    (( gpu_wait += 2 ))
+                done
+                if (( gpu_wait >= 60 )); then
+                    echo "Warning: GPU processes still present after 60s, attempting restart anyway"
+                fi
+                sleep 3  # extra settle time for driver cleanup
+                restarts=-3  # extra patience: 8 total attempts (3 extra + 5 normal)
+                continue
+            fi
             wait "$pid" 2>/dev/null && exit_code=$? || exit_code=$?
         else
             echo "Server failed to become healthy."
@@ -998,6 +1121,7 @@ case "$STRATEGY" in
         else
             echo "Running on CPU only (no GPUs detected)"
         fi
+        check_memory_or_die "$RAM_AVAIL_MB" "RAM"
         # Build CPU-optimized flags from scratch (no GPU flags)
         LAUNCH_FLAGS=(
             -m "$MODEL_PATH" --host "$HOST" --port "$PORT"
@@ -1088,6 +1212,7 @@ case "$STRATEGY" in
 
     dense_cpu_offload)
         echo "Dense model with CPU offload"
+        check_memory_or_die "$(( TOTAL_VRAM_MB + RAM_AVAIL_MB - SYSTEM_HEADROOM_MB ))" "GPU+RAM"
         if (( GPU_COUNT > 1 )); then
             GRAPH_EXTRA=(--split-mode graph --no-mmap)
             if (( IS_IK_LLAMA )); then
@@ -1147,12 +1272,7 @@ else
     echo "Expert size per layer: ~${EXPERT_PER_LAYER_MB}MB (estimated 90%, no tensor data)"
 fi
 
-# Total KV cache size (model-specific, used for VRAM budgeting)
-case "$KV_TYPE" in
-    f16)   KV_TOTAL_MB=$KV_F16_MB ;;
-    q8_0)  KV_TOTAL_MB=$KV_Q8_MB ;;
-    q4_0)  KV_TOTAL_MB=$KV_Q4_MB ;;
-esac
+# KV_TOTAL_MB already set in Section 4 after KV type selection
 
 # Check cached config
 if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" ]]; then
@@ -1297,12 +1417,24 @@ if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
     done
 fi
 
-# Phase 2: If still over RAM after maxing GPU budgets, warn and proceed
+# Phase 2: If still over RAM after maxing GPU budgets, refuse to launch
 # KV cache lives on GPUs so reducing context doesn't help RAM
 if (( RAM_NEEDED > RAM_AVAIL_MB )); then
-    echo "WARNING: Model needs ~${RAM_NEEDED}MB RAM but only ${RAM_AVAIL_MB}MB available"
-    echo "  The auto-tuner will adjust after first run. If the server crashes,"
-    echo "  consider closing other applications or adding more system RAM."
+    echo ""
+    echo "ERROR: MoE model does not fit in RAM after maxing GPU budgets."
+    echo "  CPU expert layers: ${LAYERS_CPU} layers (${CPU_EXPERT_MB}MB)"
+    echo "  CUDA host buffers: ${CUDA_HOST_MB}MB"
+    echo "  RAM padding (15%): $(( TENSOR_RAM_PADDED - CPU_EXPERT_MB ))MB"
+    echo "  ─────────────────────────────"
+    echo "  Total RAM needed:  ${RAM_NEEDED}MB"
+    echo "  RAM available:     ${RAM_AVAIL_MB}MB"
+    echo "  Shortfall:         $(( RAM_NEEDED - RAM_AVAIL_MB ))MB"
+    echo ""
+    echo "  Options:"
+    echo "  1. Add more system RAM"
+    echo "  2. Use a smaller quantization (IQ3 → IQ2)"
+    echo "  3. Use a smaller model"
+    exit 1
 fi
 
 # Build -ot string
