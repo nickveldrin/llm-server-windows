@@ -19,6 +19,7 @@
 #   llm-server <model.gguf> --kv-quality high  # KV cache: high(f16), mid(q8_0), low(q4_0)
 #   llm-server <model.gguf> --gpus 0,1         # Use only GPU 0 and 1
 #   llm-server <model.gguf> --ram-budget 60G   # Cap RAM usage at 60GB
+#   llm-server <model.gguf> --mmproj proj.gguf # Enable vision (forces multi-GPU)
 #
 # Environment variables:
 #   LLAMA_SERVER    Path to llama-server binary (auto-detected if not set)
@@ -69,6 +70,7 @@ USER_LIB_PATH=""
 KV_QUALITY="low"  # high (f16), mid (q8_0), low (q4_0, default)
 GPUS_FILTER=""
 RAM_BUDGET_MB=0
+MMPROJ_PATH=""
 
 # Cleanup on exit
 cleanup() {
@@ -146,6 +148,7 @@ while [[ $# -gt 0 ]]; do
             KV_QUALITY="$2"; shift 2 ;;
         --gpus)        GPUS_FILTER="$2"; shift 2 ;;
         --ram-budget)  RAM_BUDGET_MB="$2"; shift 2 ;;
+        --mmproj)      MMPROJ_PATH="$2"; shift 2 ;;
         --download)  DOWNLOAD=1; shift ;;
         --version)     echo "llm-server v$VERSION"; exit 0 ;;
         --help|-h)
@@ -741,6 +744,20 @@ if (( GPU_COUNT > 0 )); then
     COMMON_FLAGS+=(-ngl 999 -mg "${GPU_INDEX[${GPU_ORDER[0]}]}")
 fi
 
+# Multimodal projector (vision support)
+if [[ -n "$MMPROJ_PATH" ]]; then
+    if [[ ! -f "$MMPROJ_PATH" ]]; then
+        if [[ -f "$MODEL_DIR/$MMPROJ_PATH" ]]; then
+            MMPROJ_PATH="$MODEL_DIR/$MMPROJ_PATH"
+        else
+            echo "Error: mmproj file not found: $MMPROJ_PATH"
+            exit 1
+        fi
+    fi
+    COMMON_FLAGS+=(--mmproj "$MMPROJ_PATH")
+    echo "  Vision: mmproj loaded from $MMPROJ_PATH"
+fi
+
 # ═══════════════════════════════════════════════════════════════
 # Section 5: Strategy Selection
 # ═══════════════════════════════════════════════════════════════
@@ -824,6 +841,18 @@ choose_strategy() {
 }
 
 STRATEGY=$(choose_strategy)
+
+# Vision (mmproj) needs extra VRAM — avoid single GPU when multi-GPU is available
+if [[ -n "$MMPROJ_PATH" && "$STRATEGY" == "single_gpu" && GPU_COUNT -gt 1 ]]; then
+    if (( IS_MOE )); then
+        STRATEGY="moe_offload"
+        echo "  Vision: forcing moe_offload (mmproj needs extra VRAM)"
+    else
+        STRATEGY="multi_gpu_dense"
+        echo "  Vision: forcing multi_gpu_dense (mmproj needs extra VRAM)"
+    fi
+fi
+
 echo ""
 echo "Strategy: $STRATEGY"
 

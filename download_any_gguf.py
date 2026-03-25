@@ -44,30 +44,40 @@ def get_hf_repo():
 
 
 def list_available_quantizations(repo):
-    """List available quantizations for a model"""
+    """List available quantizations with total file sizes.
+    Returns list of (quant_name, total_size_bytes) tuples sorted by size."""
     try:
-        files = list_repo_files(repo)
-        gguf_files = [f for f in files if f.endswith(".gguf")]
+        api = HfApi()
+        info = api.model_info(repo, files_metadata=True)
+        gguf_files = [
+            (s.rfilename, s.size or 0)
+            for s in info.siblings
+            if s.rfilename.endswith(".gguf") and "mmproj" not in s.rfilename.lower()
+        ]
 
         if not gguf_files:
             return []
 
         import re
 
-        quantizations = set()
-
-        # Comprehensive quantization pattern matching all GGUF formats (non-capturing groups)
+        # Comprehensive quantization pattern matching all GGUF formats
         quant_pattern = re.compile(
-            r"(?:IQ[2-8]_[NLXS]|Q[2-9]_(?:K_?(?:XL|XL_?M|L|S|M)|0|[1-9]_?[KS])|MXFP4|MXP4|BF16|F16|F32|F8|I4)",
+            r"(IQ[2-8]_(?:XXS|XS|NL|S|M|L)|Q[2-9]_(?:K_?(?:XL|XL_?M|L|S|M)|0|[1-9]_?[KS])|MXFP4|MXP4|BF16|F16|F32|F8|I4)",
             re.IGNORECASE,
         )
 
-        for f in gguf_files:
-            matches = quant_pattern.findall(f)
-            # findall with non-capturing groups returns strings
-            quantizations.update(matches)
+        # Map each quant to its total size (sum of split files)
+        quant_sizes = {}
+        for fname, size in gguf_files:
+            basename = fname.split("/")[-1]
+            matches = quant_pattern.findall(basename)
+            for m in matches:
+                if m not in quant_sizes:
+                    quant_sizes[m] = 0
+                quant_sizes[m] += size
 
-        return sorted(quantizations, key=lambda x: x.upper())
+        # Sort by size (smallest to largest)
+        return sorted(quant_sizes.items(), key=lambda x: x[1])
     except Exception as e:
         print(f"Warning: Could not list quantizations: {e}")
         return []
@@ -323,29 +333,40 @@ def get_args():
     return parser.parse_args()
 
 
-def recommend_quant(repo, vram_mb, ram_mb):
-    """Recommend the best quantization based on hardware"""
+def recommend_quant(quant_list, vram_mb, ram_mb):
+    """Recommend the best quantization based on actual file sizes and hardware.
+    quant_list: list of (quant_name, size_bytes) sorted by size ascending.
+    Returns (quant_name, reason) or (None, None) if nothing fits."""
     total_mb = vram_mb + ram_mb
-
-    # Heuristic for a "typical" 27B-35B model size (most common for power users)
-    # We use bits-per-weight (bpw) to estimate
-    # Q8_0 (~8.5 bpw), Q4_K_M (~4.8 bpw), IQ3_XXS (~3.1 bpw)
+    # Reserve overhead for KV cache, compute buffers, OS (~30% of model size or 2GB min)
+    overhead_mb = 2048
 
     print(
         f"\n🖥️  Hardware detected: {vram_mb / 1024:.1f}GB VRAM | {ram_mb / 1024:.1f}GB System RAM"
     )
-    print(f"   Total Memory: {total_mb / 1024:.1f}GB")
+    print(f"   Total Memory: {total_mb / 1024:.1f}GB (model + ~2GB overhead for KV cache & buffers)")
 
-    if vram_mb > 48000:
-        return "Q8_0", "High-End: Fits entirely in VRAM with maximum quality."
-    elif vram_mb > 24000:
-        return "Q6_K", "Performance: Fits in VRAM with near-perfect quality."
-    elif total_mb > 64000:
-        return "Q4_K_M", "Sweet Spot: Best balance of size/quality for offloading."
-    elif total_mb > 32000:
-        return "Q3_K_M", "Efficiency: Fits in memory, prioritized for stability."
-    else:
-        return "IQ2_XXS", "Compatibility: Minimal size to run on this hardware."
+    # Pick the largest quant that fits in total memory (VRAM + RAM)
+    # Iterate from largest to smallest to find the best quality that fits
+    best = None
+    for quant_name, size_bytes in reversed(quant_list):
+        size_mb = size_bytes / (1024 * 1024)
+        if size_mb + overhead_mb <= total_mb:
+            fits_vram = size_mb + overhead_mb <= vram_mb
+            if fits_vram:
+                reason = f"Fits entirely in VRAM ({size_mb / 1024:.1f}GB model, {vram_mb / 1024:.1f}GB available)"
+            else:
+                reason = f"Fits in VRAM+RAM ({size_mb / 1024:.1f}GB model, {total_mb / 1024:.1f}GB available)"
+            best = (quant_name, reason)
+            break
+
+    if not best:
+        # Nothing fits — recommend smallest
+        quant_name, size_bytes = quant_list[0]
+        size_mb = size_bytes / (1024 * 1024)
+        best = (quant_name, f"Smallest available ({size_mb / 1024:.1f}GB) — may not fit, consider a smaller model")
+
+    return best
 
 
 def select_quantization(repo, vram_mb=0, ram_mb=0):
@@ -356,7 +377,7 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
         files = list_repo_files(repo)
         has_safetensors = any(f.endswith(".safetensors") for f in files)
         has_ggufs = any(f.endswith(".gguf") for f in files)
-        
+
         if has_safetensors and not has_ggufs:
             print(f"\n⚠️  NOTICE: This repository contains Safetensors, not GGUF files.")
             print(f"   Inference via llama.cpp/ik_llama requires GGUF format.")
@@ -365,23 +386,25 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
     except:
         pass
 
-    quantizations = list_available_quantizations(repo)
+    quant_list = list_available_quantizations(repo)
 
-    if not quantizations:
+    if not quant_list:
         print("   No GGUF quantizations found, downloading all .gguf files")
         return None
 
-    # Get Recommendation
+    # Get Recommendation based on actual file sizes
     rec_q = ""
     if vram_mb > 0:
-        rec_q, rec_reason = recommend_quant(repo, vram_mb, ram_mb)
-        print(f"\n🌟 RECOMMENDED: {rec_q}")
-        print(f"   Reason: {rec_reason}")
+        rec_q, rec_reason = recommend_quant(quant_list, vram_mb, ram_mb)
+        if rec_q:
+            print(f"\n🌟 RECOMMENDED: {rec_q}")
+            print(f"   {rec_reason}")
 
     print(f"\nAvailable quantizations:")
-    for i, q in enumerate(quantizations, 1):
+    for i, (q, size_bytes) in enumerate(quant_list, 1):
+        size_gb = size_bytes / (1024**3)
         star = " ★" if q == rec_q else ""
-        print(f"  {i}) {q}{star}")
+        print(f"  {i}) {q:15s} {size_gb:6.1f} GB{star}")
 
     print("\nPress Enter to use the ★ recommendation (if available) or download all")
     print()
@@ -394,8 +417,8 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
 
         try:
             idx = int(choice) - 1
-            if 0 <= idx < len(quantizations):
-                return quantizations[idx]
+            if 0 <= idx < len(quant_list):
+                return quant_list[idx][0]
         except ValueError:
             pass
 
