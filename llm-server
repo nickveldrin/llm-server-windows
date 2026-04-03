@@ -396,7 +396,7 @@ TOTAL_SIZE_MB=$(awk "BEGIN {printf \"%.0f\", $TOTAL_SIZE_BYTES/1048576}")
 TOTAL_SIZE_GB=$(awk "BEGIN {printf \"%.1f\", $TOTAL_SIZE_BYTES/1073741824}")
 
 # Read GGUF metadata
-read -r LAYER_COUNT EXPERT_COUNT HEAD_COUNT_KV KEY_LENGTH VALUE_LENGTH HAS_SSM HAS_FUSED EXPERT_BYTES NON_EXPERT_BYTES < <(MODEL_PATH="$MODEL_PATH" python3 -c "
+read -r LAYER_COUNT EXPERT_COUNT HEAD_COUNT_KV KEY_LENGTH VALUE_LENGTH HAS_SSM HAS_FUSED EXPERT_BYTES NON_EXPERT_BYTES MODEL_ARCH < <(MODEL_PATH="$MODEL_PATH" python3 -c "
 import struct, sys, glob, os, re
 
 # GGUF type -> (bytes_per_block, elements_per_block) from ggml.h struct sizes
@@ -451,7 +451,10 @@ def skip_kv(f, kv_count):
             if 'key_length' in key: r['kl'] = val
             if 'value_length' in key: r['vl'] = val
             if 'ssm.state_size' in key: r['ssm'] = 1
-        elif vt == 8: f.read(struct.unpack('<Q', f.read(8))[0])
+        elif vt == 8:
+            sl = struct.unpack('<Q', f.read(8))[0]
+            val = f.read(sl).decode('utf-8', errors='replace')
+            if key.endswith('.architecture'): r['arch'] = val
         elif vt == 9:
             at = struct.unpack('<I', f.read(4))[0]; al = struct.unpack('<Q', f.read(8))[0]
             if at in KV_FIXED: f.read(al * KV_FIXED[at])
@@ -513,7 +516,7 @@ try:
                 skip_kv(f, kvc)
                 read_tensors(f, tc)
 except: pass
-print(r.get('layers',0), r.get('experts',0), r.get('hkv',0), r.get('kl',0), r.get('vl',0), r.get('ssm',0), r.get('fused',0), r.get('expert_bytes',0), r.get('non_expert_bytes',0))
+print(r.get('layers',0), r.get('experts',0), r.get('hkv',0), r.get('kl',0), r.get('vl',0), r.get('ssm',0), r.get('fused',0), r.get('expert_bytes',0), r.get('non_expert_bytes',0), r.get('arch','unknown'))
 " 2>/dev/null || echo "0 0 0 0 0 0 0 0 0")
 
 LAYER_COUNT=${LAYER_COUNT:-0}
@@ -525,7 +528,7 @@ HAS_SSM=${HAS_SSM:-0}
 HAS_FUSED=${HAS_FUSED:-0}
 EXPERT_BYTES=${EXPERT_BYTES:-0}
 NON_EXPERT_BYTES=${NON_EXPERT_BYTES:-0}
-
+MODEL_ARCH=${MODEL_ARCH:-unknown}
 [[ "$LAYER_COUNT" == "0" ]] && LAYER_COUNT=48 && echo "Warning: Could not detect layer count, using default (48)"
 
 IS_MOE=0
@@ -541,12 +544,49 @@ echo "Architecture: ${LAYER_COUNT} layers, $([ "$IS_MOE" = "1" ] && echo "${EXPE
 # Health check timeout: 240s base, +60s per 100GB of model size
 HEALTH_TIMEOUT=$(( 240 + TOTAL_SIZE_MB / 1700 ))
 
-# ═══════════════════════════════════════════════════════════════
-# Section 4: Smart Flag Builder
+# Section 4: Binary Selection & Support Checks
 # ═══════════════════════════════════════════════════════════════
 
-echo ""
-echo "─── Configuring flags ───"
+# Check if model is known to be unsupported by ik_llama.cpp
+IS_UNSUPPORTED_IK=0
+if [[ "$MODEL_ARCH" == "gemma4" ]]; then
+    IS_UNSUPPORTED_IK=1
+    echo "Info: architecture '$MODEL_ARCH' is NOT supported by ik_llama.cpp. Forcing mainline llama.cpp."
+fi
+
+# Re-detect binary if needed
+if [[ -z "$USER_SERVER_BIN" ]]; then
+    if (( IS_UNSUPPORTED_IK )); then
+        # Prefer mainline for unsupported models
+        MAINLINE="$HOME/llama.cpp/build/bin/llama-server"
+        if [[ -x "$MAINLINE" ]]; then
+            LLAMA_SERVER="$MAINLINE"
+        fi
+    fi
+fi
+
+# Apply final binary choice
+if [[ -n "$USER_SERVER_BIN" ]]; then
+    LLAMA_SERVER="$USER_SERVER_BIN"
+fi
+
+if [[ -z "$LLAMA_SERVER" || ! -x "$LLAMA_SERVER" ]]; then
+    echo "Error: llama-server binary not found or not executable."
+    exit 1
+fi
+
+setup_lib_hub "$LLAMA_SERVER"
+
+# Detect if we're running ik_llama.cpp (supports --split-mode graph)
+IS_IK_LLAMA=0
+if "$LLAMA_SERVER" --help 2>&1 | grep -q "ikawrakow"; then
+    IS_IK_LLAMA=1
+fi
+
+(( IS_IK_LLAMA )) && echo "Backend: ik_llama.cpp (graph split enabled)" || echo "Backend: llama.cpp (mainline)"
+
+# ═══════════════════════════════════════════════════════════════
+# Section 5: Smart Flag Builder
 
 # ── Context shift: crashes on hybrid SSM/Mamba models ──
 CONTEXT_SHIFT_FLAG=""
@@ -1047,17 +1087,31 @@ run_with_restart() {
             fi
             restarts=0  # reset counter on successful start
 
-            # Monitor log for CUDA errors — server stays "alive" but braindead after these
+            # Monitor log for fatal errors — server stays "alive" but braindead after these
             local cuda_killed=0
             local log_pos=$log_start
             while kill -0 "$pid" 2>/dev/null; do
                 sleep 5
-                if tail -c +"$log_pos" "$SERVER_LOG" 2>/dev/null | grep -q "CUDA error"; then
+                local new_log
+                new_log=$(tail -c +"$log_pos" "$SERVER_LOG" 2>/dev/null) || new_log=""
+                # CUDA errors — instant kill
+                if echo "$new_log" | grep -q "CUDA error"; then
                     echo ""
                     echo "═══ CUDA error detected — server is braindead, killing ═══"
                     tail -5 "$SERVER_LOG" 2>/dev/null
                     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
                     cuda_killed=1
+                    break
+                fi
+                # Image decode loop — server retries forever on bad image, stuck
+                local img_fails
+                img_fails=$(echo "$new_log" | grep -c "failed to process image" 2>/dev/null) || img_fails=0
+                if (( img_fails >= 10 )); then
+                    echo ""
+                    echo "═══ Image decode loop detected ($img_fails failures) — server is stuck, killing ═══"
+                    tail -5 "$SERVER_LOG" 2>/dev/null
+                    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+                    cuda_killed=1  # treat same as CUDA kill (recovery, not crash)
                     break
                 fi
                 log_pos=$(wc -c < "$SERVER_LOG" 2>/dev/null || echo "$log_pos")
@@ -1128,6 +1182,44 @@ run_with_restart() {
             echo "Runtime crash (ran ${uptime}s). Restart $restarts/$MAX_RESTARTS in ${wait_sec}s..."
         else
             echo "Startup crash. Restart $restarts/$MAX_RESTARTS in ${wait_sec}s..."
+
+            # Auto-fallback: if ik_llama.cpp can't load the model, try mainline llama.cpp
+            if (( IS_IK_LLAMA )) && [[ -z "$USER_SERVER_BIN" ]]; then
+                local recent_log
+                recent_log=$(tail -c +$((log_start)) "$SERVER_LOG" 2>/dev/null) || recent_log=""
+                if echo "$recent_log" | grep -q "unknown model architecture\|unable to load model\|error loading model"; then
+                    local mainline_bin="$HOME/llama.cpp/build/bin/llama-server"
+                    if [[ -x "$mainline_bin" ]]; then
+                        echo ""
+                        echo "═══ ik_llama.cpp cannot load this model — falling back to mainline llama.cpp ═══"
+                        LLAMA_SERVER="$mainline_bin"
+                        IS_IK_LLAMA=0
+                        setup_lib_hub "$LLAMA_SERVER"
+                        # Remove ik_llama-specific flags that mainline doesn't support
+                        local new_flags=()
+                        local skip_next=0
+                        for f in "${flags[@]}"; do
+                            if (( skip_next )); then
+                                echo "  Removing ik-only flag value: $f"
+                                skip_next=0
+                                continue
+                            fi
+                            case "$f" in
+                                --no-context-shift|-cram)
+                                    echo "  Removing ik-only flag: $f" ;;
+                                --split-mode|--ctx-checkpoints|--defrag-thold)
+                                    echo "  Removing ik-only flag: $f"
+                                    skip_next=1 ;;
+                                *)
+                                    new_flags+=("$f") ;;
+                            esac
+                        done
+                        flags=("${new_flags[@]}")
+                        restarts=0
+                        echo "  Retrying with: $LLAMA_SERVER"
+                    fi
+                fi
+            fi
         fi
 
         sleep "$wait_sec"
@@ -1180,19 +1272,56 @@ case "$STRATEGY" in
         ;;
 
     multi_gpu_dense)
-        echo "Dense model split across $GPU_COUNT GPUs"
+        # Find the smallest subset of fastest GPUs that can fit the model
+        # GPU_ORDER is already sorted by bandwidth (descending)
+        USE_GPU_COUNT=$GPU_COUNT
+        for n in $(seq 2 $(( GPU_COUNT ))); do
+            subset_vram=0
+            for j in $(seq 0 $(( n - 1 ))); do
+                gi=${GPU_ORDER[$j]}
+                (( subset_vram += GPU_VRAM_FREE[$gi] )) || true
+            done
+            if (( VRAM_NEEDED_MB <= subset_vram )); then
+                USE_GPU_COUNT=$n
+                break
+            fi
+        done
+
+        # Build set of selected GPU indices for quick lookup
+        declare -A SELECTED_GPUS
+        for j in $(seq 0 $(( USE_GPU_COUNT - 1 ))); do
+            SELECTED_GPUS[${GPU_ORDER[$j]}]=1
+        done
+
+        if (( USE_GPU_COUNT < GPU_COUNT )); then
+            echo "Dense model split across $USE_GPU_COUNT of $GPU_COUNT GPUs (skipping slower GPUs)"
+            for j in $(seq 0 $(( USE_GPU_COUNT - 1 ))); do
+                gi=${GPU_ORDER[$j]}
+                echo "  Using GPU${GPU_INDEX[$gi]}: ${GPU_NAME[$gi]} (bw=${GPU_BANDWIDTH[$gi]})"
+            done
+        else
+            echo "Dense model split across $GPU_COUNT GPUs"
+        fi
+
         # Build tensor-split proportional to free VRAM weighted by bandwidth
+        # Zero-weight GPUs not in the selected subset
         total_weighted=0
         for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
-            (( total_weighted += GPU_VRAM_FREE[$i] * GPU_BANDWIDTH[$i] )) || true
+            if [[ -n "${SELECTED_GPUS[$i]:-}" ]]; then
+                (( total_weighted += GPU_VRAM_FREE[$i] * GPU_BANDWIDTH[$i] )) || true
+            fi
         done
         TS=""
         for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
-            w=$(awk "BEGIN {printf \"%.2f\", ${GPU_VRAM_FREE[$i]} * ${GPU_BANDWIDTH[$i]} / $total_weighted}")
+            if [[ -n "${SELECTED_GPUS[$i]:-}" ]]; then
+                w=$(awk "BEGIN {printf \"%.2f\", ${GPU_VRAM_FREE[$i]} * ${GPU_BANDWIDTH[$i]} / $total_weighted}")
+            else
+                w="0.00"
+            fi
             TS="${TS:+$TS,}$w"
         done
         echo "Tensor split: $TS"
-        
+
         # Prefer graph split for both backends if more than 1 GPU
         GRAPH_EXTRA=(--split-mode graph --tensor-split "$TS")
         
@@ -1224,17 +1353,21 @@ case "$STRATEGY" in
             fi
         else
             # Mainline llama.cpp
-            if (( DRY_RUN )); then
-                print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
-                exit 0
-            fi
             # Test if mainline supports graph mode
             if timeout 5 "$LLAMA_SERVER" --help 2>&1 | grep -q "graph" 2>/dev/null; then
+                if (( DRY_RUN )); then
+                    print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
+                    exit 0
+                fi
                 echo "Mainline supports graph mode — attempting launch..."
                 run_with_restart "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
             else
                 # Fallback to row split (classic mainline multi-GPU)
                 LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --split-mode row --tensor-split "$TS")
+                if (( DRY_RUN )); then
+                    print_cmd "${LAUNCH_FLAGS[@]}"
+                    exit 0
+                fi
                 run_with_restart "${LAUNCH_FLAGS[@]}"
             fi
         fi
