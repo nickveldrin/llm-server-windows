@@ -83,7 +83,10 @@ The "manual flags" run uses `-ngl 999 -fa on` and lets the server split across a
 - **Split Mode Graph** — Automatically enables `-sm graph` for both `ik_llama.cpp` and mainline for superior multi-GPU scaling.
 - **Heterogeneous GPU support** — different VRAM sizes, different PCIe bandwidths, properly weighted.
 - **MoE expert auto-placement** — starts conservative, measures actual VRAM usage, optimizes, caches for instant next startup.
-- **Crash recovery** — auto-restarts with backoff on runtime crashes.
+- **Vision support** — `--vision` auto-detects and downloads the correct mmproj from HuggingFace. Also works with `--mmproj auto` or a specific path.
+- **Auto-update** — `--update` pulls latest ik_llama.cpp and llama.cpp, rebuilds with CUDA, and automatically rolls back if the new binary breaks.
+- **Auto-fallback** — if ik_llama.cpp can't load a model (unsupported architecture), automatically switches to mainline llama.cpp mid-launch.
+- **Crash recovery** — auto-restarts with backoff on runtime crashes, detects CUDA errors and image decode loops.
 - **Benchmark mode** — `--benchmark` to measure tok/s and auto-exit after completion.
 
 ## Install
@@ -116,8 +119,14 @@ cd llm-server
 # Basic — auto-detects everything
 llm-server model.gguf
 
+# Vision — auto-downloads the matching mmproj from HuggingFace
+llm-server model.gguf --vision
+
 # Interactive Download & Recommend — specify any HuggingFace repository
 llm-server unsloth/Qwen3.5-27B-GGUF --download
+
+# Update backends — pulls, rebuilds, rolls back if broken
+llm-server --update
 
 # Force a specific backend
 llm-server --server-bin /path/to/llama-server model.gguf
@@ -136,6 +145,34 @@ llm-server small-model.gguf --gpus 2 --port 8082 --ram-budget 30G
 When you use `--download`, the script calculates your total available memory:
 `Total = System VRAM + System RAM`
 It then looks at the model repository and recommends the quantization level that will give you the best balance of speed and quality for your specific hardware.
+
+### Vision (multimodal)
+Many models support image input via a separate mmproj (multimodal projector) file. With `--vision`, llm-server:
+1. Checks for an existing mmproj in the model directory
+2. Verifies it matches the loaded model (e.g., won't use a Qwen mmproj for Gemma)
+3. If missing or mismatched, downloads the correct `mmproj-F16.gguf` from HuggingFace automatically
+4. Infers the correct HuggingFace repo from GGUF metadata (`general.basename` + `general.quantized_by`)
+
+You can also use `--mmproj path/to/mmproj.gguf` to specify a file directly.
+
+### Auto-update
+`llm-server --update` updates both ik_llama.cpp and llama.cpp backends safely:
+1. Backs up the current working binary
+2. `git pull` the latest changes
+3. Rebuilds with the existing cmake configuration (preserves your CUDA flags)
+4. Smoke-tests the new binary
+5. If the build fails or the binary crashes → rolls back to the previous commit and restores the backup
+
+This means you can update fearlessly — a broken upstream commit won't leave you without a working server.
+
+### Auto-fallback
+If ik_llama.cpp can't load a model (e.g., unsupported architecture like Gemma 4), llm-server automatically:
+1. Detects the load failure from the server log
+2. Switches to mainline llama.cpp
+3. Strips ik_llama-specific flags (graph split, checkpoints, etc.)
+4. Retries the launch — no manual intervention needed
+
+This also works via static detection: known unsupported architectures are caught before launch and routed to mainline directly.
 
 ### Native Fused Support
 Modern GGUF quants often "fuse" tensors (e.g., `ffn_up_gate`) for 10-20% faster processing. While these previously caused crashes on specialized backends, `llm-server` now detects these models and enables the optimized fused kernels in `ik_llama.cpp` automatically.

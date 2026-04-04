@@ -19,7 +19,10 @@
 #   llm-server <model.gguf> --kv-quality high  # KV cache: high(f16), mid(q8_0), low(q4_0)
 #   llm-server <model.gguf> --gpus 0,1         # Use only GPU 0 and 1
 #   llm-server <model.gguf> --ram-budget 60G   # Cap RAM usage at 60GB
-#   llm-server <model.gguf> --mmproj proj.gguf # Enable vision (forces multi-GPU)
+#   llm-server --update                         # Update ik_llama.cpp & llama.cpp (with fallback)
+#   llm-server <model.gguf> --vision           # Auto-detect/download mmproj for vision
+#   llm-server <model.gguf> --mmproj auto      # Same as --vision
+#   llm-server <model.gguf> --mmproj proj.gguf # Enable vision with specific mmproj file
 #
 # Environment variables:
 #   LLAMA_SERVER    Path to llama-server binary (auto-detected if not set)
@@ -71,6 +74,7 @@ KV_QUALITY="low"  # high (f16), mid (q8_0), low (q4_0, default)
 GPUS_FILTER=""
 RAM_BUDGET_MB=0
 MMPROJ_PATH=""
+DO_UPDATE=0
 
 # Cleanup on exit
 cleanup() {
@@ -149,7 +153,9 @@ while [[ $# -gt 0 ]]; do
         --gpus)        GPUS_FILTER="$2"; shift 2 ;;
         --ram-budget)  RAM_BUDGET_MB="$2"; shift 2 ;;
         --mmproj)      MMPROJ_PATH="$2"; shift 2 ;;
+        --vision)      MMPROJ_PATH="auto"; shift ;;  # alias: auto-detect/download mmproj
         --download)  DOWNLOAD=1; shift ;;
+        --update)    DO_UPDATE=1; shift ;;
         --version)     echo "llm-server v$VERSION"; exit 0 ;;
         --help|-h)
             sed -n '2,/^$/s/^# \?//p' "$0"
@@ -184,7 +190,7 @@ if ! [[ "$CTX_SIZE" =~ ^[0-9]+$ ]] || (( CTX_SIZE < 1 )); then
     exit 1
 fi
 
-if [[ -z "$MODEL_ARG" ]]; then
+if [[ -z "$MODEL_ARG" ]] && (( !DO_UPDATE )); then
     echo "Error: No model specified. Usage: llm-server <model.gguf> or <repo/name> --download"
     exit 1
 fi
@@ -217,6 +223,145 @@ if (( DOWNLOAD )); then
     echo ""
     echo "Download step complete."
     echo "To launch your new model, run: llm-server <path_to_downloaded_file>"
+    exit 0
+fi
+
+# ── Update Logic ──
+if (( DO_UPDATE )); then
+    update_backend() {
+        local name="$1" repo_dir="$2"
+        local build_dir="$repo_dir/build"
+        local binary="$build_dir/bin/llama-server"
+
+        echo ""
+        echo "═══ Updating $name ═══"
+
+        if [[ ! -d "$repo_dir/.git" ]]; then
+            echo "  Skip: $repo_dir is not a git repo"
+            return 1
+        fi
+
+        cd "$repo_dir"
+
+        # Save current state for rollback
+        local old_commit
+        old_commit=$(git rev-parse HEAD 2>/dev/null)
+        local old_binary_hash=""
+        [[ -x "$binary" ]] && old_binary_hash=$(md5sum "$binary" | awk '{print $1}')
+        echo "  Current: $(git log --oneline -1)"
+
+        # Backup working binary
+        if [[ -x "$binary" ]]; then
+            cp "$binary" "${binary}.backup"
+            echo "  Backed up working binary"
+        fi
+
+        # Pull latest
+        echo "  Pulling latest..."
+        if ! git pull --ff-only 2>&1 | tail -3; then
+            echo "  Warning: fast-forward pull failed, trying rebase..."
+            if ! git pull --rebase 2>&1 | tail -3; then
+                echo "  FAILED: git pull failed — skipping $name"
+                return 1
+            fi
+        fi
+
+        local new_commit
+        new_commit=$(git rev-parse HEAD 2>/dev/null)
+        if [[ "$old_commit" == "$new_commit" ]]; then
+            echo "  Already up to date."
+            rm -f "${binary}.backup"
+            return 0
+        fi
+        echo "  Updated: $(git log --oneline -1)"
+
+        # Build
+        echo "  Building..."
+        local nproc
+        nproc=$(nproc 2>/dev/null || echo 8)
+
+        # Ensure build directory exists with same cmake config
+        if [[ -d "$build_dir" ]]; then
+            # Rebuild with existing cmake cache (preserves CUDA flags etc.)
+            if ! cmake --build "$build_dir" --config Release -j"$nproc" 2>&1 | tail -5; then
+                echo "  BUILD FAILED — rolling back..."
+                git checkout "$old_commit" 2>/dev/null
+                [[ -f "${binary}.backup" ]] && mv "${binary}.backup" "$binary"
+                echo "  Rolled back to $old_commit"
+                return 1
+            fi
+        else
+            echo "  No build directory — skipping (run cmake manually first)"
+            git checkout "$old_commit" 2>/dev/null
+            return 1
+        fi
+
+        # Verify new binary exists and runs
+        if [[ ! -x "$binary" ]]; then
+            echo "  Binary missing after build — rolling back..."
+            git checkout "$old_commit" 2>/dev/null
+            [[ -f "${binary}.backup" ]] && mv "${binary}.backup" "$binary"
+            return 1
+        fi
+
+        # Quick smoke test: binary can print help without crashing
+        if ! timeout 10 "$binary" --help >/dev/null 2>&1; then
+            echo "  Binary crashes on --help — rolling back..."
+            git checkout "$old_commit" 2>/dev/null
+            [[ -f "${binary}.backup" ]] && mv "${binary}.backup" "$binary"
+            echo "  Rolled back to $old_commit"
+            return 1
+        fi
+
+        local new_binary_hash
+        new_binary_hash=$(md5sum "$binary" | awk '{print $1}')
+        if [[ "$old_binary_hash" == "$new_binary_hash" ]]; then
+            echo "  Binary unchanged (no relevant code changes)"
+        else
+            echo "  New binary built successfully ✓"
+        fi
+
+        # Clean up backup
+        rm -f "${binary}.backup"
+        echo "  $name updated: $(git log --oneline -1)"
+        return 0
+    }
+
+    echo "═══ llm-server backend updater ═══"
+
+    IK_DIR="$HOME/ik_llama.cpp"
+    MAIN_DIR="$HOME/llama.cpp"
+    ik_ok=0
+    main_ok=0
+
+    if [[ -d "$IK_DIR" ]]; then
+        update_backend "ik_llama.cpp" "$IK_DIR" && ik_ok=1
+    else
+        echo "ik_llama.cpp not found at $IK_DIR — skipping"
+    fi
+
+    if [[ -d "$MAIN_DIR" ]]; then
+        update_backend "llama.cpp" "$MAIN_DIR" && main_ok=1
+    else
+        echo "llama.cpp not found at $MAIN_DIR — skipping"
+    fi
+
+    echo ""
+    echo "═══ Update summary ═══"
+    (( ik_ok ))   && echo "  ik_llama.cpp: updated ✓" || echo "  ik_llama.cpp: unchanged/failed"
+    (( main_ok )) && echo "  llama.cpp:    updated ✓" || echo "  llama.cpp:    unchanged/failed"
+
+    # Show what's available now
+    for dir in "$IK_DIR" "$MAIN_DIR"; do
+        local_bin="$dir/build/bin/llama-server"
+        if [[ -x "$local_bin" ]]; then
+            local ver
+            ver=$("$local_bin" --version 2>/dev/null | grep -m1 "version:" || echo "unknown")
+            [[ "$ver" == "unknown" ]] && ver=$(cd "$dir" && git log --oneline -1 2>/dev/null || echo "unknown")
+            echo "  $(basename "$dir"): $ver"
+        fi
+    done
+
     exit 0
 fi
 
@@ -530,7 +675,7 @@ try:
                 read_tensors(f, tc)
 except: pass
 print(r.get('layers',0), r.get('experts',0), r.get('hkv',0), r.get('kl',0), r.get('vl',0), r.get('ssm',0), r.get('fused',0), r.get('expert_bytes',0), r.get('non_expert_bytes',0), r.get('arch','unknown'))
-" 2>/dev/null || echo "0 0 0 0 0 0 0 0 0")
+" 2>/dev/null || echo "0 0 0 0 0 0 0 0 0 unknown")
 
 LAYER_COUNT=${LAYER_COUNT:-0}
 EXPERT_COUNT=${EXPERT_COUNT:-0}
@@ -542,6 +687,44 @@ HAS_FUSED=${HAS_FUSED:-0}
 EXPERT_BYTES=${EXPERT_BYTES:-0}
 NON_EXPERT_BYTES=${NON_EXPERT_BYTES:-0}
 MODEL_ARCH=${MODEL_ARCH:-unknown}
+
+# Parse extra GGUF metadata for mmproj auto-download (name, basename, quantizer)
+eval "$(MODEL_PATH="$MODEL_PATH" python3 -c "
+import struct, sys, os
+r = {}
+KV_FIXED = {0:1,1:1,2:2,3:2,4:4,5:4,6:4,7:1,10:8,11:8,12:8}
+try:
+    with open(os.environ['MODEL_PATH'], 'rb') as f:
+        if f.read(4) != b'GGUF': sys.exit(0)
+        f.read(4)
+        struct.unpack('<Q', f.read(8))
+        kvc = struct.unpack('<Q', f.read(8))[0]
+        for _ in range(kvc):
+            kl = struct.unpack('<Q', f.read(8))[0]
+            key = f.read(kl).decode('utf-8', errors='replace')
+            vt = struct.unpack('<I', f.read(4))[0]
+            if vt == 8:
+                sl = struct.unpack('<Q', f.read(8))[0]
+                val = f.read(sl).decode('utf-8', errors='replace')
+                if key == 'general.name': r['n'] = val
+                elif key == 'general.basename': r['b'] = val
+                elif key == 'general.quantized_by': r['q'] = val
+            elif vt == 9:
+                at = struct.unpack('<I', f.read(4))[0]; al = struct.unpack('<Q', f.read(8))[0]
+                if at in KV_FIXED: f.read(al * KV_FIXED[at])
+                elif at == 8:
+                    for _ in range(al): f.read(struct.unpack('<Q', f.read(8))[0])
+                else: break
+            elif vt in KV_FIXED: f.read(KV_FIXED[vt])
+            else: break
+except: pass
+for k,e in [('GGUF_MODEL_NAME','n'),('GGUF_BASENAME','b'),('GGUF_QUANTIZED_BY','q')]:
+    v = r.get(e,'').replace(\"'\",\"\")
+    print(f\"{k}='{v}'\")
+" 2>/dev/null)" || true
+GGUF_MODEL_NAME="${GGUF_MODEL_NAME:-}"
+GGUF_BASENAME="${GGUF_BASENAME:-}"
+GGUF_QUANTIZED_BY="${GGUF_QUANTIZED_BY:-}"
 [[ "$LAYER_COUNT" == "0" ]] && LAYER_COUNT=48 && echo "Warning: Could not detect layer count, using default (48)"
 
 IS_MOE=0
@@ -798,7 +981,125 @@ if (( GPU_COUNT > 0 )); then
 fi
 
 # Multimodal projector (vision support)
-if [[ -n "$MMPROJ_PATH" ]]; then
+# --mmproj auto (or --vision): auto-detect locally or download from HuggingFace
+# --mmproj <path>: use specific file
+find_local_mmproj() {
+    # Look for mmproj files in model directory, matching model name
+    local dir="$MODEL_DIR_PATH"
+    # Exact match patterns (most reliable)
+    for f in "$dir"/mmproj-F16.gguf "$dir"/mmproj-BF16.gguf "$dir"/mmproj-F32.gguf; do
+        [[ -f "$f" ]] && echo "$f" && return
+    done
+    # Glob for any mmproj
+    for f in "$dir"/*mmproj*.gguf; do
+        [[ -f "$f" ]] && echo "$f" && return
+    done
+    # Also check MODEL_DIR (may differ from model's directory)
+    if [[ "$dir" != "$MODEL_DIR" ]]; then
+        for f in "$MODEL_DIR"/mmproj-F16.gguf "$MODEL_DIR"/mmproj-BF16.gguf; do
+            [[ -f "$f" ]] && echo "$f" && return
+        done
+    fi
+    echo ""
+}
+
+download_mmproj() {
+    # Try to download mmproj from HuggingFace based on model metadata
+    local basename="${GGUF_BASENAME:-$GGUF_MODEL_NAME}"
+    local quantizer="${GGUF_QUANTIZED_BY:-}"
+    [[ -z "$basename" ]] && return 1
+
+    # Build candidate HuggingFace repo names
+    # Common pattern: {quantizer}/{basename}-GGUF (e.g. unsloth/gemma-4-31B-it-GGUF)
+    local candidates=()
+    if [[ -n "$quantizer" ]]; then
+        # Unsloth/bartowski/etc style: quantizer/BaseName-GGUF
+        candidates+=("${quantizer}/${basename}-GGUF")
+        # Also try with model name (sometimes differs from basename)
+        [[ -n "$GGUF_MODEL_NAME" && "$GGUF_MODEL_NAME" != "$basename" ]] && \
+            candidates+=("${quantizer}/${GGUF_MODEL_NAME}-GGUF")
+    fi
+    # Also try common quantizers
+    for q in unsloth bartowski lmstudio-community; do
+        [[ "$q" == "$quantizer" ]] && continue
+        candidates+=("${q}/${basename}-GGUF")
+    done
+
+    local mmproj_name="mmproj-F16.gguf"
+    local dest="$MODEL_DIR_PATH/$mmproj_name"
+
+    for repo in "${candidates[@]}"; do
+        local url="https://huggingface.co/${repo}/resolve/main/${mmproj_name}"
+        echo "  Trying: $url"
+        if curl -sfL --head "$url" >/dev/null 2>&1; then
+            echo "  Downloading mmproj from ${repo}..."
+            if curl -fL --progress-bar -o "$dest" "$url"; then
+                # Verify it's actually a GGUF file
+                if python3 -c "
+import struct, sys
+with open('$dest','rb') as f:
+    magic = f.read(4)
+    if magic != b'GGUF': sys.exit(1)
+" 2>/dev/null; then
+                    echo "  Downloaded: $dest"
+                    echo "$dest"
+                    return 0
+                else
+                    echo "  Warning: downloaded file is not a valid GGUF, removing"
+                    rm -f "$dest"
+                fi
+            fi
+        fi
+    done
+    return 1
+}
+
+if [[ "$MMPROJ_PATH" == "auto" ]]; then
+    echo "  Vision: auto-detecting mmproj..."
+    MMPROJ_PATH=$(find_local_mmproj)
+    if [[ -n "$MMPROJ_PATH" ]]; then
+        # Verify the local mmproj matches our model architecture
+        local_mmproj_arch=$(python3 -c "
+import struct, sys
+KV_FIXED = {0:1,1:1,2:2,3:2,4:4,5:4,6:4,7:1,10:8,11:8,12:8}
+try:
+    with open('$MMPROJ_PATH','rb') as f:
+        if f.read(4) != b'GGUF': sys.exit(1)
+        f.read(4); struct.unpack('<Q',f.read(8)); kvc=struct.unpack('<Q',f.read(8))[0]
+        for _ in range(kvc):
+            kl=struct.unpack('<Q',f.read(8))[0]; key=f.read(kl).decode('utf-8','replace')
+            vt=struct.unpack('<I',f.read(4))[0]
+            if vt==8:
+                sl=struct.unpack('<Q',f.read(8))[0]; val=f.read(sl).decode('utf-8','replace')
+                if key=='general.name': print(val); sys.exit(0)
+            elif vt==9:
+                at=struct.unpack('<I',f.read(4))[0]; al=struct.unpack('<Q',f.read(8))[0]
+                if at in KV_FIXED: f.read(al*KV_FIXED[at])
+                elif at==8:
+                    for _ in range(al): f.read(struct.unpack('<Q',f.read(8))[0])
+                else: break
+            elif vt in KV_FIXED: f.read(KV_FIXED[vt])
+            else: break
+except: pass
+print('unknown')
+" 2>/dev/null)
+        # Check if mmproj name contains our model name (loose match)
+        if [[ -n "$GGUF_MODEL_NAME" && "$local_mmproj_arch" != *"$GGUF_MODEL_NAME"* && "$GGUF_MODEL_NAME" != *"$local_mmproj_arch"* ]]; then
+            echo "  Warning: local mmproj is for '$local_mmproj_arch', model is '$GGUF_MODEL_NAME'"
+            echo "  Downloading correct mmproj instead..."
+            MMPROJ_PATH=""
+        else
+            echo "  Found local mmproj: $MMPROJ_PATH"
+        fi
+    fi
+    if [[ -z "$MMPROJ_PATH" ]]; then
+        MMPROJ_PATH=$(download_mmproj) || true
+        if [[ -z "$MMPROJ_PATH" ]]; then
+            echo "  Warning: could not find or download mmproj — vision disabled"
+            echo "  To fix: download mmproj-F16.gguf into $MODEL_DIR_PATH/"
+        fi
+    fi
+elif [[ -n "$MMPROJ_PATH" ]]; then
     if [[ ! -f "$MMPROJ_PATH" ]]; then
         if [[ -f "$MODEL_DIR/$MMPROJ_PATH" ]]; then
             MMPROJ_PATH="$MODEL_DIR/$MMPROJ_PATH"
@@ -807,6 +1108,8 @@ if [[ -n "$MMPROJ_PATH" ]]; then
             exit 1
         fi
     fi
+fi
+if [[ -n "$MMPROJ_PATH" && -f "$MMPROJ_PATH" ]]; then
     COMMON_FLAGS+=(--mmproj "$MMPROJ_PATH")
     echo "  Vision: mmproj loaded from $MMPROJ_PATH"
 fi
