@@ -8,8 +8,7 @@
 # Usage:
 #   llm-server <repo/name> --download    # Download from HuggingFace
 #   llm-server -h                        # Show this help message
-#   llm-server <model.gguf>              # Launch with auto-tuning
-#   llm-server <model.gguf> --retune     # Force re-optimization
+#   llm-server <model.gguf>              # Launch (uses cached tune if available)
 #   llm-server <model.gguf> --dry-run    # Print command without executing
 #   llm-server --port 8082 <model.gguf>  # Custom port
 #   llm-server <model.gguf> --benchmark  # Start, run quick benchmark, print tok/s
@@ -23,7 +22,8 @@
 #   llm-server <model.gguf> --vision           # Auto-detect/download mmproj for vision
 #   llm-server <model.gguf> --mmproj auto      # Same as --vision
 #   llm-server <model.gguf> --mmproj proj.gguf # Enable vision with specific mmproj file
-#   llm-server <model.gguf> --ai-tune         # AI-driven flag tuning (benchmark 6 configs)
+#   llm-server <model.gguf> --ai-tune          # AI-driven flag optimization (8 rounds)
+#   llm-server <model.gguf> --ai-tune --retune # Force re-tune even if cache exists
 #
 # Environment variables:
 #   LLAMA_SERVER    Path to llama-server binary (auto-detected if not set)
@@ -161,7 +161,7 @@ while [[ $# -gt 0 ]]; do
         --ai-tune)   DO_AI_TUNE=1; shift ;;
         --version)     echo "llm-server v$VERSION"; exit 0 ;;
         --help|-h)
-            sed -n '2,/^$/s/^# \?//p' "$0"
+            sed -n '3,/^$/s/^# \?//p' "$0"
             exit 0
             ;;
         *)           MODEL_ARG="$1"; shift ;;
