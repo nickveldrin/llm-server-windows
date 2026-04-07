@@ -1373,7 +1373,12 @@ try_start() {
     local extra_flags=("$@")
     RUNNING_PID=""
     # Use process substitution to get the REAL pid of the server, not the tee pid
-    "$LLAMA_SERVER" "${COMMON_FLAGS[@]}" "${extra_flags[@]}" > >(tee -a "$SERVER_LOG") 2>&1 &
+    if (( START_OPENCODE )); then
+        # OpenCode needs the terminal — send server output to log only
+        "$LLAMA_SERVER" "${COMMON_FLAGS[@]}" "${extra_flags[@]}" >> "$SERVER_LOG" 2>&1 &
+    else
+        "$LLAMA_SERVER" "${COMMON_FLAGS[@]}" "${extra_flags[@]}" > >(tee -a "$SERVER_LOG") 2>&1 &
+    fi
     local pid=$!
     local i=0
     while (( i < HEALTH_TIMEOUT )); do
