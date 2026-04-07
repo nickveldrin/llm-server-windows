@@ -1513,9 +1513,23 @@ run_with_restart() {
             fi
 
             if (( START_OPENCODE )); then
-                echo "Launching OpenCode..."
-                "$(dirname "$(readlink -f "$0")")/opencode/start-opencode.sh" &
-                START_OPENCODE=0 # only run once
+                # Robust script lookup
+                local base_dir
+                base_dir="$(dirname "$(readlink -f "$0")")"
+                local script_path="$base_dir/opencode/start-opencode.sh"
+                
+                # Fallback for installed environments
+                if [[ ! -f "$script_path" ]]; then
+                    script_path="$base_dir/start-opencode.sh"
+                fi
+
+                if [[ -f "$script_path" ]]; then
+                    echo "Launching OpenCode via $script_path..."
+                    "$script_path" &
+                    START_OPENCODE=0 # only run once
+                else
+                    echo "Error: Could not find opencode/start-opencode.sh (checked $base_dir)"
+                fi
             fi
 
             restarts=0  # reset counter on successful start
