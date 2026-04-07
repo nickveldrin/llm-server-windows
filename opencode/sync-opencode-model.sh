@@ -1,7 +1,10 @@
 #!/bin/bash
 
 # Configuration
-CONFIG_FILE="/home/mik/.config/opencode/opencode.json"
+# Find the config file in a portable way
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
+[[ ! -f "$CONFIG_FILE" ]] && CONFIG_FILE="$HOME/.opencode.json"
+
 MODELS_URL="http://localhost:8081/v1/models"
 SLOTS_URL="http://localhost:8081/slots"
 
