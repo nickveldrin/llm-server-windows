@@ -20,7 +20,7 @@ Most llm-server users leave 20-50% performance on the table because the "good en
 llm-server model.gguf --ai-tune
 ```
 
-The model being served proposes its own optimal flags, benchmarks each one, learns from the results, and iterates — 10 rounds of self-optimization. The winner is cached for instant use on every future launch.
+The model being served proposes its own optimal flags, benchmarks each one, learns from the results, and iterates — 8 rounds of self-optimization. Crashes get free retries so every round counts. The winner is cached for instant use on every future launch.
 
 ```
 Round 0/8: Benchmarking baseline (heuristic config)...
@@ -50,7 +50,7 @@ No external API needed. No internet required. The model tunes itself using its o
 2. Queries the running model: "Here's my hardware, the full --help, and the baseline. Propose a better config."
 3. Parses the JSON response, launches with proposed flags, benchmarks
 4. Feeds results back: "That got 39.69 tok/s. Try to beat it."
-5. Repeats for 10 rounds. Saves the winner to cache.
+5. Repeats for 8 rounds (crashes get free retries). Saves the winner to cache.
 6. Next `llm-server model.gguf` → uses cached config instantly
 
 The LLM sees every available flag, your exact GPU specs, PCIe topology, and all past tuning results. It learns across sessions — crash data, what worked, what didn't.
@@ -106,7 +106,7 @@ llm-server model.gguf
 
 ## Features
 
-- **AI Self-Tuning** — `--ai-tune` lets the model optimize its own server flags. 10 rounds of iterative benchmarking. Cached for instant reuse. +54% generation speed in real tests.
+- **AI Self-Tuning** — `--ai-tune` lets the model optimize its own server flags. 8 rounds of iterative benchmarking (crashes get free retries). Cached for instant reuse. +54% generation speed in real tests.
 - **Built-in GGUF Downloader** — Use `--download` with any HuggingFace repo. Automatically recommends the best quantization based on your total VRAM and System RAM.
 - **Native Fused Support** — Full compatibility with fused `ffn_up_gate` models (e.g., AesSedai) using high-performance `ik_llama.cpp` kernels.
 - **Lib Hub** — Automatically symlinks all required `.so` libraries into a temporary directory, solving library path issues.
@@ -189,7 +189,7 @@ The model being served acts as its own performance consultant:
 1. Runs heuristic config as baseline → benchmarks
 2. Sends the model its hardware profile, GGUF metadata, full `--help` output, and baseline results
 3. Model proposes a flag config as JSON → script benchmarks it
-4. Results fed back → model proposes next config → repeat for 10 rounds
+4. Results fed back → model proposes next config → repeat for 8 rounds
 5. Winner cached at `~/.cache/llm-server/` — used automatically on future launches
 6. All results persisted to `tune_history.jsonl` — the model learns across sessions
 

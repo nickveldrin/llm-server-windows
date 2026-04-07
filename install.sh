@@ -19,12 +19,12 @@ echo ""
 OS="$(uname -s)"
 case "$OS" in
     Darwin)
-        FILES=("llm-server-mac" "llm-server-gui")
+        FILES=("llm-server-mac" "llm-server-gui" "llm-opencode")
         # On macOS, also create a 'llm-server' symlink pointing to the mac version
         SYMLINK_MAC=1
         ;;
     *)
-        FILES=("llm-server" "llm-server-gui")
+        FILES=("llm-server" "llm-server-gui" "llm-opencode")
         SYMLINK_MAC=0
         ;;
 esac
@@ -106,3 +106,4 @@ echo "Done! You can now run:"
 echo "  llm-server <model.gguf>      # Smart Launcher"
 echo "  llm-server-gui               # Model Selector (TUI)"
 echo "  llm-server <repo> --download # Smart Downloader"
+echo "  llm-opencode                 # Sync config + launch OpenCode"

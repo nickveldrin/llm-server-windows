@@ -12,7 +12,7 @@
 #   llm-server-gui -h|--help          # Show this help message
 #
 # Interactive options (after model selection):
-#   [a] AI Tune    — Run AI-driven flag optimization (10 rounds)
+#   [a] AI Tune    — Run AI-driven flag optimization (8 rounds)
 #   [b] Benchmark  — Start, run quick benchmark, print tok/s
 #   [v] Vision     — Auto-detect/download mmproj for multimodal
 #   [o] OpenCode   — Launch OpenCode after server is healthy

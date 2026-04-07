@@ -1513,50 +1513,29 @@ run_with_restart() {
             fi
 
             if (( START_OPENCODE )); then
-                # Robust multi-path search for the startup script
+                # Find llm-opencode (installed by install.sh)
+                local oc_bin=""
                 local base_dir
                 base_dir="$(dirname "$(readlink -f "$0")")"
-                
-                local script_path=""
-                local search_paths=(
-                    "${OPENCODE_SCRIPT_PATH:-}"                      # User-configured path
-                    "$base_dir/opencode/start-opencode.sh"           # Repo layout
-                    "$base_dir/start-opencode.sh"                    # Flat layout
-                    "$HOME/llm-server/opencode/start-opencode.sh"    # Common git clone fallback
-                    "$HOME/.local/share/llm-server/opencode/start-opencode.sh" # XDG data fallback
-                )
-
-                for path in "${search_paths[@]}"; do
-                    if [[ -f "$path" ]]; then
-                        script_path="$path"
-                        break
-                    fi
+                for path in \
+                    "$(command -v llm-opencode 2>/dev/null || true)" \
+                    "$base_dir/llm-opencode" \
+                    "$HOME/.local/bin/llm-opencode" \
+                    "$HOME/llm-server/llm-opencode"; do
+                    [[ -n "$path" && -x "$path" ]] && oc_bin="$path" && break
                 done
 
-                if [[ -n "$script_path" ]]; then
-                    echo "Launching OpenCode via $script_path..."
-                    "$script_path" &
-                    START_OPENCODE=0 # only run once
+                if [[ -n "$oc_bin" ]]; then
+                    echo "Launching OpenCode..."
+                    echo "  Server logs: $SERVER_LOG"
+                    echo ""
+                    # OpenCode is a TUI — give it the foreground TTY
+                    "$oc_bin" --port "$PORT" </dev/tty >/dev/tty 2>/dev/tty
                 else
-                    echo "Error: Could not find opencode/start-opencode.sh"
-                    if [[ -t 0 && -t 1 ]]; then
-                        echo ""
-                        read -rp "Please enter the full path to your start-opencode.sh: " user_path
-                        user_path="${user_path/#\~/$HOME}"
-                        if [[ -f "$user_path" ]]; then
-                            echo "OPENCODE_SCRIPT_PATH=\"$user_path\"" >> "$CONFIG_FILE"
-                            echo "✓ Path saved to $CONFIG_FILE"
-                            echo "Launching OpenCode via $user_path..."
-                            "$user_path" &
-                            START_OPENCODE=0
-                        else
-                            echo "Error: File not found at $user_path"
-                        fi
-                    else
-                        echo "  Checked locations:"
-                        for path in "${search_paths[@]}"; do echo "    - $path"; done
-                    fi
+                    echo "Warning: llm-opencode not found. Run: ./install.sh"
+                    echo "  Or launch manually: llm-opencode"
                 fi
+                START_OPENCODE=0
             fi
 
             restarts=0  # reset counter on successful start
