@@ -23,7 +23,7 @@
 #   llm-server <model.gguf> --vision           # Auto-detect/download mmproj for vision
 #   llm-server <model.gguf> --mmproj auto      # Same as --vision
 #   llm-server <model.gguf> --mmproj proj.gguf # Enable vision with specific mmproj file
-#   llm-server <model.gguf> --ai-tune          # AI-driven flag optimization (10 rounds)
+#   llm-server <model.gguf> --ai-tune          # AI-driven flag optimization (8 rounds)
 #   llm-server <model.gguf> --ai-tune --retune # Force re-tune even if cache exists
 #
 # Environment variables:
@@ -79,6 +79,9 @@ MMPROJ_PATH=""
 DO_UPDATE=0
 DO_AI_TUNE=0
 START_OPENCODE=0
+
+# Ensure common local paths are in PATH for sub-scripts (OpenCode, etc.)
+export PATH="$HOME/.local/bin:$PATH"
 
 # Cleanup on exit
 cleanup() {
@@ -848,11 +851,9 @@ HEALTH_TIMEOUT=$(( 240 + TOTAL_SIZE_MB / 1700 ))
 # ═══════════════════════════════════════════════════════════════
 
 # Check if model is known to be unsupported by ik_llama.cpp
+# Note: gemma4 was added in ik_llama.cpp #1581 — no longer excluded
+# The runtime auto-fallback (Section 6a) handles any remaining unsupported architectures
 IS_UNSUPPORTED_IK=0
-if [[ "$MODEL_ARCH" == "gemma4" ]]; then
-    IS_UNSUPPORTED_IK=1
-    echo "Info: architecture '$MODEL_ARCH' is NOT supported by ik_llama.cpp. Forcing mainline llama.cpp."
-fi
 
 # Re-detect binary if needed
 if [[ -z "$USER_SERVER_BIN" ]]; then
@@ -2063,8 +2064,9 @@ Benchmark: gen=${baseline_gen} tok/s, pp=${baseline_pp} tok/s
 - batch 2048-4096 is usually optimal, above 4096 diminishing returns
 - threads for gen = physical cores, hyperthreads don't help
 - --no-mmap needed when model partly on GPU + partly on RAM
-- For ik_llama.cpp: --run-time-repack always helps, -khad improves quantized KV quality for free
-- For ik_llama.cpp MoE: -muge and -ger give 10-20% speedup
+- Quantized KV cache (q4_0/q8_0) REQUIRES --flash-attn on — crashes without it
+- ONLY use flags that appear in the --help output above. Unknown flags crash the server.
+- Check the "backend" field in Model info to know which server you're tuning.
 
 # Previous tuning history (learn from past results!)
 ${tune_history}
