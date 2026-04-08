@@ -2002,6 +2002,25 @@ print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
         return 0
     fi
 
+    # Warn if model is very large relative to system memory
+    # AI tune needs to reload the model multiple times — tight fits risk OOM or very slow cycles
+    local total_ram_mb
+    total_ram_mb=$(awk '/MemTotal/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null) || total_ram_mb=${RAM_AVAIL_MB}
+    local system_mem_mb=$(( TOTAL_VRAM_MB + total_ram_mb ))
+    local model_pct=$(( TOTAL_SIZE_MB * 100 / system_mem_mb ))
+    if (( model_pct > 70 )); then
+        echo ""
+        echo "WARNING: Model uses ${model_pct}% of system memory (${TOTAL_SIZE_MB}MB / ${system_mem_mb}MB)."
+        echo "  AI Tune reloads the model each round — this will be very slow (~${AI_TUNE_ROUNDS}x load time)"
+        echo "  and may trigger OOM on memory-constrained systems."
+        echo ""
+        read -r -t 30 -p "Continue with AI Tune? [y/N] " answer < /dev/tty || answer="n"
+        if [[ "${answer,,}" != "y" ]]; then
+            echo "AI Tune cancelled."
+            return 0
+        fi
+    fi
+
     echo ""
     echo "═══════════════════════════════════════════════════"
     echo "  AI Tune — iterative LLM-driven optimization"
