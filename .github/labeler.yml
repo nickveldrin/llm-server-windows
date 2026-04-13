@@ -1,32 +1,49 @@
-# GitHub Labeler configuration
-# https://github.com/github/labeler
+# GitHub Labeler configuration for PRs
+# https://github.com/actions/labeler
 
+# PR Labels based on file changes
 labeler-automation:
-  - .github/**/*
-  - .github/**
-  - .github/workflows/*
+  - any:
+      - changed-files:
+          - any-glob-to-any-file:
+              - .github/**/*
 
 linting:
-  - "*.py"
-  - "**/*.py"
+  - any:
+      - changed-files:
+          - any-glob-to-any-file:
+              - "*.py"
+              - "**/*.py"
 
 shell:
-  - "*.sh"
-  - "**/*.sh"
+  - any:
+      - changed-files:
+          - any-glob-to-any-file:
+              - "*.sh"
+              - "**/*.sh"
 
 mac:
-  - "llm-server-mac"
-  - "**/llm-server-mac*"
+  - any:
+      - changed-files:
+          - any-glob-to-any-file:
+              - "llm-server-mac"
+              - "**/llm-server-mac*"
 
 windows:
-  - "llm-server-windows.py"
-  - "**/llm-server-windows*"
+  - any:
+      - changed-files:
+          - any-glob-to-any-file:
+              - "llm-server-windows.py"
+              - "**/llm-server-windows*"
 
 linux:
-  - "llm-server"
-  - "**/llm-server"
+  - any:
+      - changed-files:
+          - any-glob-to-any-file:
+              - "llm-server"
+              - "**/llm-server"
 
-# Default issue labels
+# Default issue labels (for when issues are created, not PRs)
 labels:
   - name: bug
     color: d73a4a
