@@ -1,0 +1,27 @@
+# GitHub Labeler configuration
+# https://github.com/github/labeler
+
+labeler-automation:
+  - .github/**/*
+  - .github/**
+  - .github/workflows/*
+
+linting:
+  - "*.py"
+  - "**/*.py"
+
+shell:
+  - "*.sh"
+  - "**/*.sh"
+
+mac:
+  - "llm-server-mac"
+  - "**/llm-server-mac*"
+
+windows:
+  - "llm-server-windows.py"
+  - "**/llm-server-windows*"
+
+linux:
+  - "llm-server"
+  - "**/llm-server"
