@@ -1,1 +1,3 @@
-pip install psutil requests wmi
+psutil
+requests
+wmi
