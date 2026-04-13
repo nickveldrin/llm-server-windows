@@ -1,0 +1,4 @@
+llm-server-windows = "llm_server_windows:main"
+
+[project.scripts]
+llm-server-windows = "llm_server_windows:main"
