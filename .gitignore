@@ -3,3 +3,7 @@
 __pycache__/
 .ruff_cache/
 unsloth_compiled_cache/
+.venv/
+venv/
+*.pyc/
+*.pyo
