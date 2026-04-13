@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Benchmark --ai-tune across multiple models.
+"""Benchmark --ai-tune across multiple models.
 Runs each model with heuristic baseline, then ai-tune, compares results.
 
 Usage:
@@ -10,15 +9,16 @@ Usage:
     python3 benchmark-ai-tune.py --skip mmproj      # Skip files matching pattern
 """
 
-import subprocess
-import json
-import sys
-import os
-import time
-import signal
 import argparse
-from pathlib import Path
+import contextlib
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from datetime import datetime
+from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 LLM_SERVER = SCRIPT_DIR / "llm-server"
@@ -28,18 +28,21 @@ RESULTS_FILE = SCRIPT_DIR / "benchmark-results.json"
 PORT = 8081
 
 
-def kill_port(port):
+def kill_port(port) -> None:
     """Kill anything on the port."""
     try:
-        pids = subprocess.check_output(
-            ["lsof", "-t", f"-i:{port}"], stderr=subprocess.DEVNULL
-        ).decode().strip()
+        pids = (
+            subprocess.check_output(
+                ["lsof", "-t", f"-i:{port}"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
         if pids:
             for pid in pids.split("\n"):
-                try:
+                with contextlib.suppress(ProcessLookupError, ValueError):
                     os.kill(int(pid), signal.SIGKILL)
-                except (ProcessLookupError, ValueError):
-                    pass
             time.sleep(3)
     except subprocess.CalledProcessError:
         pass
@@ -55,10 +58,8 @@ def get_heuristic_baseline(model_path):
         if model_name in f.name:
             backup = f.with_suffix(".json.bak")
             f.rename(backup)
-            print(f"  Backed up tune cache: {f.name}")
 
     # Start server with heuristic config + benchmark mode
-    print(f"  Starting heuristic baseline...")
     proc = subprocess.Popen(
         ["bash", str(LLM_SERVER), str(model_path), "--benchmark"],
         stdout=subprocess.PIPE,
@@ -76,18 +77,13 @@ def get_heuristic_baseline(model_path):
                 parts = line.split()
                 for p in parts:
                     if p.startswith("gen="):
-                        try:
+                        with contextlib.suppress(ValueError):
                             gen_tps = float(p.split("=")[1])
-                        except ValueError:
-                            pass
                     elif p.startswith("pp="):
-                        try:
+                        with contextlib.suppress(ValueError):
                             pp_tps = float(p.split("=")[1])
-                        except ValueError:
-                            pass
     except subprocess.TimeoutExpired:
         proc.kill()
-        print("  WARNING: Baseline benchmark timed out")
 
     kill_port(PORT)
     return gen_tps, pp_tps
@@ -103,8 +99,7 @@ def run_ai_tune(model_path, rounds=8):
         if model_name in f.name:
             f.unlink()
 
-    print(f"  Running AI tune ({rounds} rounds)...")
-    env = os.environ.copy()
+    os.environ.copy()
 
     # Temporarily patch rounds if needed
     proc = subprocess.Popen(
@@ -127,23 +122,18 @@ def run_ai_tune(model_path, rounds=8):
             if "Baseline:" in line:
                 for p in line.split():
                     if p.startswith("gen="):
-                        try:
+                        with contextlib.suppress(ValueError):
                             baseline_gen = float(p.split("=")[1])
-                        except ValueError:
-                            pass
                     elif p.startswith("pp="):
-                        try:
+                        with contextlib.suppress(ValueError):
                             baseline_pp = float(p.split("=")[1])
-                        except ValueError:
-                            pass
             if "NEW BEST:" in line or "Result:" in line:
                 rounds_completed += 1
                 for p in line.split():
                     if p.startswith("gen="):
                         try:
                             g = float(p.split("=")[1])
-                            if g > best_gen:
-                                best_gen = g
+                            best_gen = max(best_gen, g)
                         except ValueError:
                             pass
                     elif p.startswith("pp="):
@@ -167,7 +157,6 @@ def run_ai_tune(model_path, rounds=8):
 
     except subprocess.TimeoutExpired:
         proc.kill()
-        print("  WARNING: AI tune timed out after 2 hours")
 
     kill_port(PORT)
 
@@ -187,23 +176,30 @@ def run_ai_tune(model_path, rounds=8):
     }
 
 
-def restore_caches():
+def restore_caches() -> None:
     """Restore any backed-up tune caches."""
     for f in CACHE_DIR.glob("tune_*.json.bak"):
         orig = f.with_suffix("")  # remove .bak
         if not orig.exists():
             f.rename(orig)
-            print(f"Restored cache: {orig.name}")
         else:
             f.unlink()
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark --ai-tune across models")
-    parser.add_argument("models", nargs="*", help="Model paths (default: all in ~/ai_models)")
-    parser.add_argument("--rounds", type=int, default=10, help="Tuning rounds (default: 10)")
-    parser.add_argument("--skip", nargs="*", default=["mmproj"], help="Skip files matching patterns")
-    parser.add_argument("--model-dir", default=str(Path.home() / "ai_models"), help="Model directory")
+    parser.add_argument(
+        "models", nargs="*", help="Model paths (default: all in ~/ai_models)"
+    )
+    parser.add_argument(
+        "--rounds", type=int, default=10, help="Tuning rounds (default: 10)"
+    )
+    parser.add_argument(
+        "--skip", nargs="*", default=["mmproj"], help="Skip files matching patterns"
+    )
+    parser.add_argument(
+        "--model-dir", default=str(Path.home() / "ai_models"), help="Model directory"
+    )
     args = parser.parse_args()
 
     if args.models:
@@ -216,18 +212,11 @@ def main():
     models = [m for m in models if not any(s in m.name for s in args.skip)]
 
     if not models:
-        print("No models found.")
         sys.exit(1)
-
-    print(f"Benchmarking {len(models)} models with --ai-tune ({args.rounds} rounds each)")
-    print(f"Models: {', '.join(m.name for m in models)}")
-    print()
 
     results = []
 
-    for i, model in enumerate(models, 1):
-        print(f"[{i}/{len(models)}] {model.name}")
-        print(f"  Size: {model.stat().st_size / 1024**3:.1f} GB")
+    for model in models:
 
         start = time.time()
         result = run_ai_tune(model, args.rounds)
@@ -236,9 +225,17 @@ def main():
         gain_gen = 0
         gain_pp = 0
         if result["baseline_gen"] > 0:
-            gain_gen = (result["tuned_gen"] - result["baseline_gen"]) / result["baseline_gen"] * 100
+            gain_gen = (
+                (result["tuned_gen"] - result["baseline_gen"])
+                / result["baseline_gen"]
+                * 100
+            )
         if result["baseline_pp"] > 0:
-            gain_pp = (result["tuned_pp"] - result["baseline_pp"]) / result["baseline_pp"] * 100
+            gain_pp = (
+                (result["tuned_pp"] - result["baseline_pp"])
+                / result["baseline_pp"]
+                * 100
+            )
 
         result["model"] = model.name
         result["gain_gen_pct"] = round(gain_gen, 1)
@@ -247,31 +244,18 @@ def main():
         result["timestamp"] = datetime.utcnow().isoformat() + "Z"
         results.append(result)
 
-        print(f"  Baseline:  gen={result['baseline_gen']:.2f} tok/s  pp={result['baseline_pp']:.2f} tok/s")
-        print(f"  AI-Tuned:  gen={result['tuned_gen']:.2f} tok/s  pp={result['tuned_pp']:.2f} tok/s")
-        print(f"  Gain:      gen={gain_gen:+.1f}%  pp={gain_pp:+.1f}%")
-        print(f"  Winner:    {result['best_name']}")
-        print(f"  Rounds:    {result['rounds']}  Time: {result['elapsed_min']} min")
-        print()
-
     # Restore backed up caches
     restore_caches()
 
     # Print summary table
-    print("=" * 80)
-    print(f"{'Model':<45} {'Baseline':>10} {'Tuned':>10} {'Gain':>8} {'Time':>8}")
-    print("-" * 80)
-    for r in results:
-        print(f"{r['model']:<45} {r['baseline_gen']:>8.1f} → {r['tuned_gen']:>7.1f}  {r['gain_gen_pct']:>+6.1f}%  {r['elapsed_min']:>5.1f}m")
-    print("=" * 80)
+    for _r in results:
+        pass
 
-    avg_gain = sum(r["gain_gen_pct"] for r in results) / len(results) if results else 0
-    print(f"Average generation gain: {avg_gain:+.1f}%")
+    sum(r["gain_gen_pct"] for r in results) / len(results) if results else 0
 
     # Save results
-    with open(RESULTS_FILE, "w") as f:
+    with Path(RESULTS_FILE).open("w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
-    print(f"\nResults saved to {RESULTS_FILE}")
 
 
 if __name__ == "__main__":

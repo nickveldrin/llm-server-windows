@@ -1,0 +1,19 @@
+name = "llm-server-windows"
+version = "2.0.0"
+description = "AI-driven auto-tuning llama server for Windows"
+readme = "README-WINDOWS.md"
+authors = ["raketenkater"]
+license = "MIT"
+requires-python = ">=3.8"
+dependencies = [
+    "psutil>=5.9.0",
+    "requests>=2.31.0",
+    "pywin32>=306; sys_platform == 'win32'",
+]
+
+[project.scripts]
+llm-server-windows = "llm_server_windows:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

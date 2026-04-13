@@ -4,11 +4,35 @@ Smart launcher for [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) and
 
 **Now with AI-powered self-tuning: the model optimizes its own server flags.**
 
-**Supports Linux (NVIDIA CUDA), macOS (Apple Silicon Metal), and Windows (via WSL2).**
+**Supports Linux (NVIDIA CUDA), macOS (Apple Silicon Metal), Windows (native), and Windows (via WSL2).**
 
 ```bash
 llm-server model.gguf
 ```
+
+---
+
+## Windows Native Port
+
+This Windows-native port (`llm-server-windows`) is a complete Python re-implementation of the original `llm-server` bash script for Windows systems. It is **not a fork** but an independent implementation.
+
+**Original Project:** [raketenkater/llm-server](https://github.com/raketenkater/llm-server) (Linux/Mac bash script)
+
+**Windows Port:** [nickveldrin/llm-server-windows](https://github.com/nickveldrin/llm-server-windows) (Windows Python port)
+
+### Features (Windows Port)
+- ✅ GPU detection (NVIDIA via WMI/nvidia-smi)
+- ✅ AI-tune implementation (iterative LLM-driven optimization)
+- ✅ MoE expert placement via `--n-cpu-moe <N>`
+- ✅ KV quantization support (q4_0, q8_0, f16)
+- ✅ Auto-detect `llama-fit-params.exe` for optimal MoE configuration
+- ✅ Model info parsing (GGUF metadata)
+- ✅ Memory budget checking
+- ✅ Server start/stop with process management
+- ✅ Benchmark mode
+- ✅ Vision/MMproj support for multimodal models
+
+For Windows-specific documentation, see [README-WINDOWS.md](README-WINDOWS.md).
 
 ![demo](demo.gif)
 
@@ -126,11 +150,47 @@ llm-server model.gguf
 
 ## Install
 
+### Original Linux/macOS Project
+
 ```bash
 git clone https://github.com/raketenkater/llm-server.git
 cd llm-server
 ./install.sh
 ```
+
+### Windows Native Port
+
+```bash
+git clone https://github.com/nickveldrin/llm-server-windows.git
+cd llm-server-windows
+install-windows.bat
+```
+
+### Windows (Native - Recommended)
+Windows users can now run llm-server natively without WSL!
+
+**Option 1: Easy Installation (Recommended)**
+```bash
+git clone https://github.com/raketenkater/llm-server.git
+cd llm-server
+install-windows.bat
+```
+
+**Option 2: Manual Installation**
+```powershell
+# Install Python dependencies
+pip install psutil requests wmi
+
+# Or use uv (faster)
+uv pip install psutil requests wmi
+```
+
+Then run:
+```bash
+llm-server-windows.bat model.gguf
+```
+
+See [README-WINDOWS.md](README-WINDOWS.md) for detailed instructions.
 
 ### Requirements
 
@@ -143,7 +203,13 @@ cd llm-server
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) built with Metal (or `brew install llama.cpp`)
 - `python3`, `huggingface_hub`, `tqdm`, `curl`
 
-**Windows:**
+**Windows (Native - no WSL needed!):**
+- Python 3.8+ with `psutil`, `requests`, `wmi` packages
+- `nvidia-smi` (for GPU detection)
+- [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) or [llama.cpp](https://github.com/ggml-org/llama.cpp) built for Windows
+- See [README-WINDOWS.md](README-WINDOWS.md) for detailed instructions
+
+**Windows (via WSL2 - legacy):**
 - Install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) (`wsl --install` in PowerShell)
 - Inside WSL2, follow the Linux instructions above
 - NVIDIA GPU passthrough works automatically in WSL2 with up-to-date drivers
@@ -238,8 +304,13 @@ Modern GGUF quants often "fuse" tensors (e.g., `ffn_up_gate`) for 10-20% faster 
 MIT
 
 ---
-<p align="right">
-  <a href="https://www.buymeacoffee.com/raketenkater">
-    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 32px !important;width: 116px !important;" >
-  </a>
-</p>
+
+## Credits
+
+**Original Project:** [raketenkater/llm-server](https://github.com/raketenkater/llm-server) by raketenkater
+
+**Windows Port:** [nickveldrin/llm-server-windows](https://github.com/nickveldrin/llm-server-windows) by nickveldrin
+
+---
+
+

@@ -1,51 +1,47 @@
 #!/usr/bin/env python3
-"""
-Universal GGUF Model Downloader
-Download any GGUF model from HuggingFace with flexible options
+"""Universal GGUF Model Downloader
+Download any GGUF model from HuggingFace with flexible options.
 """
 
+import operator
 import os
 import sys
 from pathlib import Path
-from huggingface_hub import hf_hub_download, list_repo_files, HfApi
+
+from huggingface_hub import HfApi, list_repo_files
+
+# ============================================================================
+# IMPORTS (moved to top to comply with PEP 8)
+# ============================================================================
+
+import argparse
 
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
 
 
-def clear_screen():
-    """Clear terminal screen"""
+def clear_screen() -> None:
+    """Clear terminal screen."""
     os.system("cls" if os.name == "nt" else "clear")
 
 
-def print_header():
-    """Print application header"""
-    print("\n" + "=" * 70)
-    print(" " * 25 + "🦥 Universal GGUF Downloader")
-    print("=" * 70 + "\n")
+def print_header() -> None:
+    """Print application header."""
 
 
 def get_hf_repo():
-    """Get HuggingFace repository from user"""
-    print("\n📦 Enter HuggingFace model repository")
-    print("   Format: username/model-name")
-    print("   Examples:")
-    print("     - unsloth/Qwen3.5-35B-A3B-GGUF")
-    print("     - bartowski/Llama-3.2-3B-Instruct-GGUF")
-    print("     - MaziyarPanahi/Meta-Llama-3.1-8B-Instruct-GGUF")
-    print()
-
+    """Get HuggingFace repository from user."""
     while True:
         repo = input("Repository: ").strip()
         if repo:
             return repo
-        print("❌ Repository cannot be empty.\n")
 
 
 def list_available_quantizations(repo):
     """List available quantizations with total file sizes.
-    Returns list of (quant_name, total_size_bytes) tuples sorted by size."""
+    Returns list of (quant_name, total_size_bytes) tuples sorted by size.
+    """
     try:
         api = HfApi()
         info = api.model_info(repo, files_metadata=True)
@@ -77,14 +73,13 @@ def list_available_quantizations(repo):
                 quant_sizes[m] += size
 
         # Sort by size (smallest to largest)
-        return sorted(quant_sizes.items(), key=lambda x: x[1])
-    except Exception as e:
-        print(f"Warning: Could not list quantizations: {e}")
+        return sorted(quant_sizes.items(), key=operator.itemgetter(1))
+    except Exception:
         return []
 
 
 def get_model_files(repo, selected_quantization):
-    """Get list of files to download based on selection"""
+    """Get list of files to download based on selection."""
     try:
         import re
 
@@ -109,19 +104,13 @@ def get_model_files(repo, selected_quantization):
             matching = [f for f in files if f.endswith(".gguf")]
 
         return matching
-    except Exception as e:
-        print(f"Error listing files: {e}")
+    except Exception:
         return []
 
 
 def get_download_directory(default_path=None):
-    """Get or create download directory"""
-    if default_path:
-        default_dir = Path(default_path)
-    else:
-        default_dir = Path.home() / "ai_models"
-
-    print(f"\n📁 Download directory: {default_dir}")
+    """Get or create download directory."""
+    default_dir = Path(default_path) if default_path else Path.home() / "ai_models"
 
     if default_path:
         # If passed from llm-server, just use it without asking
@@ -129,47 +118,37 @@ def get_download_directory(default_path=None):
 
     while True:
         choice = input("Use this directory? (y/n): ").strip().lower()
-        if choice in ["y", ""]:
+        if choice in {"y", ""}:
             return default_dir
-        elif choice == "n":
+        if choice == "n":
             custom_dir = input("Enter custom path: ").strip()
             if custom_dir:
                 return Path(custom_dir)
-        else:
-            print("❌ Invalid choice.\n")
 
 
-def show_progress(progress_bytes, total_bytes, filename):
-    """Display download progress bar"""
+def show_progress(progress_bytes, total_bytes, filename) -> None:
+    """Display download progress bar."""
     if total_bytes == 0:
         return
-    percent = (progress_bytes / total_bytes) * 100
+    (progress_bytes / total_bytes) * 100
     bar_length = 40
     filled = int(bar_length * progress_bytes / total_bytes)
-    bar = "█" * filled + "░" * (bar_length - filled)
-    speed_mb = progress_bytes / (1024 * 1024)
-    print(f"\r   [{bar}] {percent:5.1f}% | {speed_mb:8.2f} MB", end="", flush=True)
+    "█" * filled + "░" * (bar_length - filled)
+    progress_bytes / (1024 * 1024)
 
 
 def download_files(repo, files_to_download, output_dir):
-    """Download model files with progress tracking"""
-    print(f"\n🚀 Downloading from: {repo}")
-    print(f"   Files to download: {len(files_to_download)}")
-    print(f"   Output: {output_dir}\n")
-
+    """Download model files with progress tracking."""
     try:
         # Create output directory
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        print("⬇️  Downloading files...")
         downloaded = []
         failed = []
 
         for filename in files_to_download:
             try:
-                print(f"\n   Downloading: {filename}")
                 from huggingface_hub import hf_hub_download
-                import tqdm
 
                 filepath = hf_hub_download(
                     repo_id=repo,
@@ -180,131 +159,43 @@ def download_files(repo, files_to_download, output_dir):
                     library_name="gguf-downloader",
                 )
 
-                size_gb = Path(filepath).stat().st_size / (1024**3)
-                print(f"   ✓ {filename} ({size_gb:.2f} GB)")
+                Path(filepath).stat().st_size / (1024**3)
                 downloaded.append((filename, filepath))
-            except Exception as e:
-                print(f"\n   ✗ Failed to download {filename}: {e}")
+            except Exception:
                 failed.append(filename)
-
-        print()  # New line after progress bars
-        print(f"\n✅ Download complete!")
-        print(f"   Successful: {len(downloaded)} file(s)")
-        if failed:
-            print(f"   Failed: {len(failed)} file(s)")
 
         return downloaded, failed
 
-    except Exception as e:
-        print(f"\n❌ Error during download: {e}")
+    except Exception:
         return [], []
 
 
 def list_files_in_directory(directory, extension=".gguf"):
-    """List all files with given extension in directory"""
+    """List all files with given extension in directory."""
     return sorted(directory.glob(f"*{extension}"))
 
 
-def print_usage_instructions(repo, output_dir):
-    """Print how to use the downloaded model"""
-    print("\n" + "=" * 70)
-    print("📖 How to use this model:")
-    print("=" * 70)
-
+def print_usage_instructions(repo, output_dir) -> None:
+    """Print how to use the downloaded model."""
     # Get the model files
     gguf_files = list_files_in_directory(output_dir, ".gguf")
 
     if not gguf_files:
-        print("\n⚠️  No GGUF files found in download directory!")
         return
 
-    print(f"\n📁 Model directory: {output_dir}")
-    print("\n📦 Available model files:")
     for f in gguf_files:
-        size_gb = f.stat().st_size / (1024**3)
-        print(f"   • {f.name} ({size_gb:.2f} GB)")
+        f.stat().st_size / (1024**3)
 
     # Check for mmproj files
-    mmproj_files = [f for f in output_dir.glob("mmproj*")]
+    mmproj_files = list(output_dir.glob("mmproj*"))
 
     if mmproj_files:
-        print("\n📦 Available mmproj (vision) files:")
         for f in mmproj_files:
-            size_mb = f.stat().st_size / (1024**2)
-            print(f"   • {f.name} ({size_mb:.2f} MB)")
-
-    print("\n" + "-" * 70)
-    print("🔧 Using llama.cpp (server mode):")
-    print("-" * 70)
-    if mmproj_files:
-        print("""
-    # For vision models:
-    ./build/bin/llama-server \\
-        --model "/path/to/model.gguf" \\
-        --mmproj "/path/to/mmproj.gguf" \\
-        --ctx-size 16384 \\
-        --port 8001
-        """)
-    else:
-        print("""
-    # For text-only models:
-    ./build/bin/llama-server \\
-        --model "/path/to/model.gguf" \\
-        --ctx-size 16384 \\
-        --port 8001
-        """)
-
-    print("\n" + "-" * 70)
-    print("🐍 Using Python (OpenAI compatible):")
-    print("-" * 70)
-    print("""
-    from openai import OpenAI
-    
-    client = OpenAI(
-        base_url="http://127.0.0.1:8001/v1",
-        api_key="sk-no-key-required",
-    )
-    
-    response = client.chat.completions.create(
-        model="qwen3.5",
-        messages=[{"role": "user", "content": "Hello!"}],
-    )
-    
-    print(response.choices[0].message.content)
-    """)
-
-    print("\n" + "-" * 70)
-    print("📋 Using llama.cpp (CLI):")
-    print("-" * 70)
-    if mmproj_files:
-        print("""
-    ./build/bin/llama-cli \\
-        --model "/path/to/model.gguf" \\
-        --mmproj "/path/to/mmproj.gguf" \\
-        --ctx-size 16384 \\
-        --temp 1.0 \\
-        --top-p 0.95 \\
-        --prompt "Your question here" \\
-        --n-predict 512
-        """)
-    else:
-        print("""
-    ./build/bin/llama-cli \\
-        --model "/path/to/model.gguf" \\
-        --ctx-size 16384 \\
-        --temp 1.0 \\
-        --top-p 0.95 \\
-        --prompt "Your prompt here" \\
-        --n-predict 512
-        """)
+            f.stat().st_size / (1024**2)
 
 
-def print_quick_examples():
-    """Print example repositories"""
-    print("\n" + "=" * 70)
-    print("📚 Example repositories to try:")
-    print("=" * 70)
-
+def print_quick_examples() -> None:
+    """Print example repositories."""
     examples = [
         ("Qwen3.5-35B-A3B", "unsloth/Qwen3.5-35B-A3B-GGUF"),
         ("Qwen3.5-122B-A10B", "unsloth/Qwen3.5-122B-A10B-GGUF"),
@@ -315,13 +206,8 @@ def print_quick_examples():
         ("Gemma 2.5 9B", "MaziyarPanahi/gemma-2.5-9b-it-GGUF"),
     ]
 
-    for name, repo in examples:
-        print(f"  • {name}: {repo}")
-
-    print()
-
-
-import argparse
+    for _name, _repo in examples:
+        pass
 
 
 def get_args():
@@ -336,15 +222,11 @@ def get_args():
 def recommend_quant(quant_list, vram_mb, ram_mb):
     """Recommend the best quantization based on actual file sizes and hardware.
     quant_list: list of (quant_name, size_bytes) sorted by size ascending.
-    Returns (quant_name, reason) or (None, None) if nothing fits."""
+    Returns (quant_name, reason) or (None, None) if nothing fits.
+    """
     total_mb = vram_mb + ram_mb
     # Reserve overhead for KV cache, compute buffers, OS (~30% of model size or 2GB min)
     overhead_mb = 2048
-
-    print(
-        f"\n🖥️  Hardware detected: {vram_mb / 1024:.1f}GB VRAM | {ram_mb / 1024:.1f}GB System RAM"
-    )
-    print(f"   Total Memory: {total_mb / 1024:.1f}GB (model + ~2GB overhead for KV cache & buffers)")
 
     # Pick the largest quant that fits in total memory (VRAM + RAM)
     # Iterate from largest to smallest to find the best quality that fits
@@ -364,56 +246,44 @@ def recommend_quant(quant_list, vram_mb, ram_mb):
         # Nothing fits — recommend smallest
         quant_name, size_bytes = quant_list[0]
         size_mb = size_bytes / (1024 * 1024)
-        best = (quant_name, f"Smallest available ({size_mb / 1024:.1f}GB) — may not fit, consider a smaller model")
+        best = (
+            quant_name,
+            f"Smallest available ({size_mb / 1024:.1f}GB) — may not fit, consider a smaller model",
+        )
 
     return best
 
 
 def select_quantization(repo, vram_mb=0, ram_mb=0):
-    """Let user select quantization"""
-    print("\n🔍 Scanning repository for available quantizations...")
-
+    """Let user select quantization."""
     try:
         files = list_repo_files(repo)
         has_safetensors = any(f.endswith(".safetensors") for f in files)
         has_ggufs = any(f.endswith(".gguf") for f in files)
 
         if has_safetensors and not has_ggufs:
-            print(f"\n⚠️  NOTICE: This repository contains Safetensors, not GGUF files.")
-            print(f"   Inference via llama.cpp/ik_llama requires GGUF format.")
-            print(f"   Search suggestion: {repo}-GGUF")
             return None
-    except:
+    except Exception:
         pass
 
     quant_list = list_available_quantizations(repo)
 
     if not quant_list:
-        print("   No GGUF quantizations found, downloading all .gguf files")
         return None
 
     # Get Recommendation based on actual file sizes
     rec_q = ""
     if vram_mb > 0:
-        rec_q, rec_reason = recommend_quant(quant_list, vram_mb, ram_mb)
-        if rec_q:
-            print(f"\n🌟 RECOMMENDED: {rec_q}")
-            print(f"   {rec_reason}")
+        rec_q, _rec_reason = recommend_quant(quant_list, vram_mb, ram_mb)
 
-    print(f"\nAvailable quantizations:")
-    for i, (q, size_bytes) in enumerate(quant_list, 1):
-        size_gb = size_bytes / (1024**3)
-        star = " ★" if q == rec_q else ""
-        print(f"  {i}) {q:15s} {size_gb:6.1f} GB{star}")
-
-    print("\nPress Enter to use the ★ recommendation (if available) or download all")
-    print()
+    for _q, size_bytes in quant_list:
+        size_bytes / (1024**3)
 
     while True:
         choice = input("Select number (or Enter for default): ").strip()
 
         if not choice:
-            return rec_q if rec_q else None
+            return rec_q or None
 
         try:
             idx = int(choice) - 1
@@ -422,67 +292,46 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
         except ValueError:
             pass
 
-        print("❌ Invalid selection. Please try again.\n")
 
-
-def main():
+def main() -> None:
     args = get_args()
     try:
         clear_screen()
         print_header()
 
         # Get repository
-        repo = args.repo if args.repo else get_hf_repo()
+        repo = args.repo or get_hf_repo()
 
         # Select files to download
         selected_quantization = select_quantization(repo, args.vram, args.ram)
         files_to_download = get_model_files(repo, selected_quantization)
 
         if not files_to_download:
-            print("\n❌ No files found to download!")
             return
 
-        print(f"\n📦 Will download {len(files_to_download)} file(s):")
-        for f in files_to_download[:5]:  # Show first 5
-            print(f"   • {f}")
-        if len(files_to_download) > 5:
-            print(f"   • ... and {len(files_to_download) - 5} more")
+        for _f in files_to_download[:5]:  # Show first 5
+            pass
+        len(files_to_download) > 5
 
         # Get download directory
         output_dir = get_download_directory(args.dir)
         # Save directly to output_dir without subfolders
 
         # Confirm
-        print("\n" + "=" * 70)
-        print("📋 Summary:")
-        print("=" * 70)
-        print(f"Repository: {repo}")
-        if selected_quantization:
-            print(f"Quantization: {selected_quantization}")
-        else:
-            print("Quantization: All GGUF files")
-        print(f"Output directory: {output_dir}")
-        print("=" * 70)
 
         confirm = input("\nStart download? (y/n): ").strip().lower()
         if confirm != "y":
-            print("❌ Download cancelled.")
             return
 
         # Download
-        downloaded, failed = download_files(repo, files_to_download, output_dir)
+        downloaded, _failed = download_files(repo, files_to_download, output_dir)
 
         if downloaded:
             print_usage_instructions(repo, output_dir)
-            print("\n🎉 Download complete!")
-        else:
-            print("\n⚠️  No files were downloaded successfully.")
 
     except KeyboardInterrupt:
-        print("\n\n⚠️  Download interrupted by user.")
         sys.exit(1)
-    except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
+    except Exception:
         import traceback
 
         traceback.print_exc()

@@ -1,0 +1,49 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    allow:
+      - dependency-type: "production"
+    groups:
+      production-dependencies:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "ruff"
+          - "black"
+      development-dependencies:
+        patterns:
+          - "ruff"
+          - "black"
+        update-types:
+          - "minor"
+          - "patch"
+    # 7-day cooldown for version updates (not security updates)
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+    
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      actions-update:
+        patterns:
+          - "*"
+    # Security updates for GitHub Actions are instant (no cooldown)
+    # Version updates get 7-day cooldown
+    cooldown:
+      default-days: 7

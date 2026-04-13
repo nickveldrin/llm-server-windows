@@ -1,0 +1,39 @@
+name: Test Windows Port
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v6.0.2
+    
+    - name: Set up Python
+      uses: actions/setup-python@v6.2.0
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      shell: pwsh
+      run: |
+        python -m pip install --upgrade pip
+        if (Test-Path requirements-windows.txt) {
+          pip install -r requirements-windows.txt
+        } else {
+          pip install psutil requests wmi
+        }
+    
+    - name: Verify Python script syntax
+      shell: pwsh
+      run: |
+        python -m py_compile llm-server-windows.py
+    
+    - name: Check for basic imports
+      shell: pwsh
+      run: |
+        python -c "import psutil; import requests; import wmi; print('All imports OK')"
