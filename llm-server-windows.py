@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""
-llm-server Windows Native Port - Complete Implementation
-AI-driven auto-tuning, process management, and performance optimization for Windows
+"""llm-server Windows Native Port - Complete Implementation
+AI-driven auto-tuning, process management, and performance optimization for Windows.
 """
 
 import os
-import sys
 import subprocess
+import sys
 import tempfile
+
 if os.name == "nt":
-    import ctypes
-import re
-import json
+    pass
+import contextlib
 import hashlib
+import json
+import re
 import shutil
-import time
-import threading
-import uuid
 import struct
-from pathlib import Path
+import time
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple, Any, Callable
+from pathlib import Path
+from typing import Any
+
 import psutil
 import requests
 import wmi
@@ -70,21 +70,19 @@ HEALTH_TIMEOUT = 240
 # ============================================================================
 
 
-def log(msg: str, level: str = "INFO", verbose: bool = False):
-    """Print message with optional verbosity"""
+def log(msg: str, level: str = "INFO", verbose: bool = False) -> None:
+    """Print message with optional verbosity."""
     if verbose or level != "DEBUG":
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"[{timestamp}] [{level}] {msg}", flush=True)
+        datetime.now().strftime("%H:%M:%S")
 
 
-def cleanup_lib_hub():
-    """Cleanup - no-op, Windows handles DLL cleanup automatically"""
-    pass
+def cleanup_lib_hub() -> None:
+    """Cleanup - no-op, Windows handles DLL cleanup automatically."""
 
 
-def setup_lib_hub(bin_path: Path) -> Optional[str]:
+def setup_lib_hub(bin_path: Path) -> str | None:
     """Add binary directory to PATH for Windows DLLs.
-    
+
     Windows automatically finds DLLs in the same directory as the executable,
     so we just need to ensure the binary's directory is in PATH.
     """
@@ -94,14 +92,12 @@ def setup_lib_hub(bin_path: Path) -> Optional[str]:
 
     # Clean up old hub
     if LIB_HUB_DIR and Path(LIB_HUB_DIR).exists():
-        try:
+        with contextlib.suppress(BaseException):
             shutil.rmtree(LIB_HUB_DIR)
-        except:
-            pass
 
     # Add binary directory to PATH (Windows finds DLLs here automatically)
     current_path = os.environ.get("PATH", "")
-    os.environ["PATH"] = f"{str(bin_dir)};{current_path}"
+    os.environ["PATH"] = f"{bin_dir!s};{current_path}"
 
     return str(bin_dir)
 
@@ -111,8 +107,8 @@ def setup_lib_hub(bin_path: Path) -> Optional[str]:
 # ============================================================================
 
 
-def get_gpus() -> List[Dict[str, Any]]:
-    """Detect GPUs on Windows"""
+def get_gpus() -> list[dict[str, Any]]:
+    """Detect GPUs on Windows."""
     gpus = []
 
     # Try WMI first
@@ -130,7 +126,7 @@ def get_gpus() -> List[Dict[str, Any]]:
                     "pcie_width": 16,
                     "pcie_gen": 3,
                     "bandwidth": 16 * 3,
-                }
+                },
             )
     except Exception as e:
         log(f"WMI detection failed: {e}", level="DEBUG")
@@ -165,13 +161,12 @@ def get_gpus() -> List[Dict[str, Any]]:
         pass
 
     # Filter GPUs with sufficient VRAM
-    gpus = [g for g in gpus if g["vram_free"] >= 500]
-
-    return gpus
+    return [g for g in gpus if g["vram_free"] >= 500]
 
 
-def get_memory() -> Tuple[int, int]:
-    """Get RAM info in MB"""
+
+def get_memory() -> tuple[int, int]:
+    """Get RAM info in MB."""
     try:
         mem = psutil.virtual_memory()
         return int(mem.available / (1024 * 1024)), int(mem.total / (1024 * 1024))
@@ -180,7 +175,7 @@ def get_memory() -> Tuple[int, int]:
 
 
 def get_cpu_cores() -> int:
-    """Get physical CPU core count"""
+    """Get physical CPU core count."""
     try:
         return psutil.cpu_count(logical=False) or 4
     except:
@@ -192,8 +187,8 @@ def get_cpu_cores() -> int:
 # ============================================================================
 
 
-def get_model_info(model_path: Path) -> Tuple[int, int, Dict[str, Any]]:
-    """Get model info: (layers, experts, metadata)"""
+def get_model_info(model_path: Path) -> tuple[int, int, dict[str, Any]]:
+    """Get model info: (layers, experts, metadata)."""
     layers = 0
     experts = 0
     metadata = {"fused": 0, "ssm": 0, "arch": "unknown"}
@@ -205,22 +200,9 @@ def get_model_info(model_path: Path) -> Tuple[int, int, Dict[str, Any]]:
                 return 0, 0, metadata
 
             f.read(4)  # version
-            tensor_count = int.from_bytes(f.read(8), "little")
+            int.from_bytes(f.read(8), "little")
             kv_count = int.from_bytes(f.read(8), "little")
 
-            KV_FIXED = {
-                0: 1,
-                1: 1,
-                2: 2,
-                3: 2,
-                4: 4,
-                5: 4,
-                6: 4,
-                7: 1,
-                10: 8,
-                11: 8,
-                12: 8,
-            }
 
             for _ in range(kv_count):
                 kl = int.from_bytes(f.read(8), "little")
@@ -251,7 +233,7 @@ def get_model_info(model_path: Path) -> Tuple[int, int, Dict[str, Any]]:
 
 
 def get_model_size(model_path: Path) -> float:
-    """Get model size in MB"""
+    """Get model size in MB."""
     total_size = 0
     model_name = model_path.name
 
@@ -274,59 +256,59 @@ def get_model_size(model_path: Path) -> float:
 
 def read_mmproj_name(mmproj_path: Path) -> str:
     """Read the 'general.name' field from mmproj GGUF file.
-    
+
     This function reads the GGUF metadata to extract the architecture name,
     similar to how the Linux bash script does it with the 'name' key.
-    
+
     Returns empty string if the field is not found or if there's an error.
     """
     try:
-        with open(mmproj_path, 'rb') as f:
-            if f.read(4) != b'GGUF':
+        with open(mmproj_path, "rb") as f:
+            if f.read(4) != b"GGUF":
                 return ""
             f.read(4)  # version
-            struct.unpack('<Q', f.read(8))  # tensor count
-            kvc = struct.unpack('<Q', f.read(8))[0]  # kv count
-            
+            struct.unpack("<Q", f.read(8))  # tensor count
+            kvc = struct.unpack("<Q", f.read(8))[0]  # kv count
+
             # KV_FIXED: type_code -> fixed_size_in_bytes (for non-string/non-array types)
             KV_FIXED = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:8, 7:1, 8:8, 9:8, 10:8, 11:8, 12:8}
-            
+
             for _ in range(kvc):
                 kl_data = f.read(8)
                 if len(kl_data) < 8:
                     break
-                kl = struct.unpack('<Q', kl_data)[0]
-                
+                kl = struct.unpack("<Q", kl_data)[0]
+
                 key_data = f.read(kl)
                 if len(key_data) < kl:
                     break
-                key = key_data.decode('utf-8', 'replace')
-                
+                key = key_data.decode("utf-8", "replace")
+
                 vt_data = f.read(4)
                 if len(vt_data) < 4:
                     break
-                vt = struct.unpack('<I', vt_data)[0]
-                
+                vt = struct.unpack("<I", vt_data)[0]
+
                 if vt == 8:  # STRING
                     sl_data = f.read(8)
                     if len(sl_data) < 8:
                         break
-                    sl = struct.unpack('<Q', sl_data)[0]
+                    sl = struct.unpack("<Q", sl_data)[0]
                     val_data = f.read(sl)
                     if len(val_data) < sl:
                         break
-                    val = val_data.decode('utf-8', 'replace')
-                    if key == 'general.name':
+                    val = val_data.decode("utf-8", "replace")
+                    if key == "general.name":
                         return val
                 elif vt == 9:  # ARRAY
                     at_data = f.read(4)
                     if len(at_data) < 4:
                         break
-                    at = struct.unpack('<I', at_data)[0]
+                    at = struct.unpack("<I", at_data)[0]
                     al_data = f.read(8)
                     if len(al_data) < 8:
                         break
-                    al = struct.unpack('<Q', al_data)[0]
+                    al = struct.unpack("<Q", al_data)[0]
                     if at in KV_FIXED:
                         f.read(al * KV_FIXED[at])
                     elif at == 8:
@@ -334,7 +316,7 @@ def read_mmproj_name(mmproj_path: Path) -> str:
                             sl_data = f.read(8)
                             if len(sl_data) < 8:
                                 break
-                            sl = struct.unpack('<Q', sl_data)[0]
+                            sl = struct.unpack("<Q", sl_data)[0]
                             f.read(sl)
                     else:
                         break
@@ -347,8 +329,8 @@ def read_mmproj_name(mmproj_path: Path) -> str:
     return ""
 
 
-def find_local_mmproj(model_dir: Path, model_name: str = "") -> Optional[Path]:
-    """Find local mmproj file, optionally matching model name"""
+def find_local_mmproj(model_dir: Path, model_name: str = "") -> Path | None:
+    """Find local mmproj file, optionally matching model name."""
     # Pattern-based search
     for pattern in ["mmproj-F16.gguf", "mmproj-BF16.gguf", "mmproj-F32.gguf"]:
         for f in model_dir.glob(pattern):
@@ -357,54 +339,51 @@ def find_local_mmproj(model_dir: Path, model_name: str = "") -> Optional[Path]:
 
     # Get list of mmproj files
     mmproj_files = list(model_dir.glob("*mmproj*.gguf"))
-    
+
     if not mmproj_files:
         return None
-    
+
     # If model_name provided, try to find exact match first
     if model_name:
         # Try to find mmproj with model name in it
         for f in mmproj_files:
             if model_name.lower().replace(".gguf", "") in f.name.lower():
                 return f
-    
+
     # Fall back to first mmproj found
     return mmproj_files[0] if mmproj_files else None
 
 
 def validate_mmproj(mmproj_path: Path, model_name: str) -> bool:
     """Validate that mmproj matches model architecture.
-    
+
     Uses bidirectional loose matching between:
     - The model's base name (extracted from model filename)
     - The mmproj's filename and GGUF metadata name
     """
     if not mmproj_path.exists():
         return False
-    
+
     # Extract base model name (remove .gguf suffix and quantization suffixes)
     base_model = model_name.lower().replace(".gguf", "")
     for suffix in ["-q4_k_m", "-q4_k_xl", "-q5_k_xl", "-q6_k", "-q8_0", "-f16", "-f32", "-bf16"]:
         base_model = base_model.replace(suffix, "")
-    
+
     mmproj_filename = mmproj_path.name.lower()
-    
+
     # Bidirectional loose matching after removing separators and common suffixes
     base_clean = base_model.replace("-", "").replace("_", "")
-    
+
     # Try GGUF metadata name first if available
     mmproj_name = read_mmproj_name(mmproj_path)
     if mmproj_name:
         mmproj_name_clean = mmproj_name.replace("-", "").replace("_", "")
         if base_clean in mmproj_name_clean or mmproj_name_clean in base_clean:
             return True
-    
+
     # Fall back to filename matching
     mmproj_clean = mmproj_filename.replace("-", "").replace("_", "").replace("mmproj", "").replace("f16", "").replace("bf16", "").replace("f32", "")
-    if base_clean in mmproj_clean or mmproj_clean in base_clean:
-        return True
-    
-    return False
+    return bool(base_clean in mmproj_clean or mmproj_clean in base_clean)
 
 
 # ============================================================================
@@ -412,24 +391,24 @@ def validate_mmproj(mmproj_path: Path, model_name: str) -> bool:
 # ============================================================================
 
 
-def find_server_binary(backend: str = "") -> Optional[Path]:
-    """Find llama-server binary"""
+def find_server_binary(backend: str = "") -> Path | None:
+    """Find llama-server binary."""
     candidates = []
 
     if backend == "ik_llama":
         candidates.append(
-            Path.home() / "ik_llama.cpp" / "build" / "bin" / "llama-server.exe"
+            Path.home() / "ik_llama.cpp" / "build" / "bin" / "llama-server.exe",
         )
     elif backend == "llama":
         candidates.append(
-            Path.home() / "llama.cpp" / "build" / "bin" / "llama-server.exe"
+            Path.home() / "llama.cpp" / "build" / "bin" / "llama-server.exe",
         )
     else:
         candidates.append(
-            Path.home() / "ik_llama.cpp" / "build" / "bin" / "llama-server.exe"
+            Path.home() / "ik_llama.cpp" / "build" / "bin" / "llama-server.exe",
         )
         candidates.append(
-            Path.home() / "llama.cpp" / "build" / "bin" / "llama-server.exe"
+            Path.home() / "llama.cpp" / "build" / "bin" / "llama-server.exe",
         )
 
     # Add Windows-style paths (most common locations) - ordered by priority
@@ -453,7 +432,7 @@ def find_server_binary(backend: str = "") -> Optional[Path]:
 
 
 def check_server_health(url: str) -> bool:
-    """Check if server is healthy"""
+    """Check if server is healthy."""
     try:
         response = requests.get(f"{url}/health", timeout=10)
         return response.status_code == 200
@@ -461,8 +440,8 @@ def check_server_health(url: str) -> bool:
         return False
 
 
-def kill_server(port: int):
-    """Kill any server on the given port"""
+def kill_server(port: int) -> None:
+    """Kill any server on the given port."""
     global RUNNING_PID
 
     if RUNNING_PID:
@@ -486,21 +465,19 @@ def kill_server(port: int):
 
     try:
         result = subprocess.run(
-            ["netstat", "-ano"], capture_output=True, text=True, timeout=5
+            ["netstat", "-ano"], capture_output=True, text=True, timeout=5,
         )
         for line in result.stdout.strip().split("\n"):
             if f":{PORT}" in line and "LISTENING" in line:
                 parts = [p for p in line.split(" ") if p]
                 if len(parts) >= 5:
                     pid = parts[-1].strip()
-                    try:
+                    with contextlib.suppress(BaseException):
                         subprocess.run(
                             ["taskkill", "/PID", pid, "/F"],
                             capture_output=True,
                             timeout=5,
                         )
-                    except:
-                        pass
     except:
         pass
 
@@ -508,12 +485,12 @@ def kill_server(port: int):
 
 
 def start_server(
-    server_bin: Path, model_path: Path, flags: List[str], verbose: bool = False
-) -> Tuple[bool, Optional[int]]:
-    """Start the server process. Returns (success, pid)"""
+    server_bin: Path, model_path: Path, flags: list[str], verbose: bool = False,
+) -> tuple[bool, int | None]:
+    """Start the server process. Returns (success, pid)."""
     global RUNNING_PID
 
-    cmd = [str(server_bin)] + flags
+    cmd = [str(server_bin), *flags]
 
     log(f"Starting: {' '.join(cmd)}", level="DEBUG", verbose=verbose)
 
@@ -561,8 +538,8 @@ def start_server(
 # ============================================================================
 
 
-def run_benchmark(url: str, port: int) -> Tuple[float, float]:
-    """Run a quick benchmark and return (gen_tps, pp_tps)"""
+def run_benchmark(url: str, port: int) -> tuple[float, float]:
+    """Run a quick benchmark and return (gen_tps, pp_tps)."""
     prompt = "Explain the theory of relativity in simple terms. Cover special and general relativity, time dilation, and gravitational effects."
 
     try:
@@ -581,7 +558,7 @@ def run_benchmark(url: str, port: int) -> Tuple[float, float]:
         if response.status_code != 200:
             return 0.0, 0.0
 
-        data = response.json()
+        response.json()
 
         # Try to get timings from /slots
         try:
@@ -614,8 +591,8 @@ def run_benchmark(url: str, port: int) -> Tuple[float, float]:
 # ============================================================================
 
 
-def build_hw_profile(gpus: List[Dict], ram_mb: int, cpu_cores: int) -> str:
-    """Build hardware profile JSON"""
+def build_hw_profile(gpus: list[dict], ram_mb: int, cpu_cores: int) -> str:
+    """Build hardware profile JSON."""
     gpu_json = "["
     for i, gpu in enumerate(gpus):
         if i > 0:
@@ -628,7 +605,7 @@ def build_hw_profile(gpus: List[Dict], ram_mb: int, cpu_cores: int) -> str:
                 "vram_total_mb": gpu["vram_total"],
                 "pcie_width": gpu["pcie_width"],
                 "pcie_gen": gpu["pcie_gen"],
-            }
+            },
         )
     gpu_json += "]"
 
@@ -638,7 +615,7 @@ def build_hw_profile(gpus: List[Dict], ram_mb: int, cpu_cores: int) -> str:
             "gpus": json.loads(gpu_json),
             "ram_available_mb": ram_mb,
             "physical_cores": cpu_cores,
-        }
+        },
     )
 
 
@@ -653,7 +630,7 @@ def build_model_profile(
     total_vram_mb: int,
     total_ram_mb: int,
 ) -> str:
-    """Build model profile JSON"""
+    """Build model profile JSON."""
     return json.dumps(
         {
             "name": model_name,
@@ -667,18 +644,18 @@ def build_model_profile(
             "total_vram_mb": total_vram_mb,
             "total_ram_mb": total_ram_mb,
             "strategy": "unknown",
-        }
+        },
     )
 
 
-def query_llm_chat(url: str, system_prompt: str, messages: List[Dict]) -> str:
-    """Query the LLM for config suggestions"""
+def query_llm_chat(url: str, system_prompt: str, messages: list[dict]) -> str:
+    """Query the LLM for config suggestions."""
     try:
         response = requests.post(
             f"{url}/v1/chat/completions",
             headers={"Content-Type": "application/json"},
             json={
-                "messages": [system_prompt] + messages,
+                "messages": [system_prompt, *messages],
                 "max_tokens": 16384,
                 "temperature": 0.3,
             },
@@ -698,12 +675,12 @@ def query_llm_chat(url: str, system_prompt: str, messages: List[Dict]) -> str:
         return "ERROR"
 
 
-def parse_tune_overrides(response_text: str) -> Dict[str, Any]:
-    """Parse JSON configuration from LLM response"""
+def parse_tune_overrides(response_text: str) -> dict[str, Any]:
+    """Parse JSON configuration from LLM response."""
     try:
         # Try to find JSON object in response
         json_match = re.search(
-            r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", response_text, re.DOTALL
+            r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", response_text, re.DOTALL,
         )
         if json_match:
             obj = json.loads(json_match.group())
@@ -716,13 +693,13 @@ def parse_tune_overrides(response_text: str) -> Dict[str, Any]:
 
 
 def load_tune_history(hw_hash: str) -> str:
-    """Load previous tuning history"""
+    """Load previous tuning history."""
     if not TUNE_HISTORY_FILE.exists():
         return "(No previous tuning data)"
 
     try:
         history = []
-        with open(TUNE_HISTORY_FILE, "r") as f:
+        with open(TUNE_HISTORY_FILE) as f:
             for line in f:
                 try:
                     entry = json.loads(line.strip())
@@ -752,7 +729,7 @@ def load_tune_history(hw_hash: str) -> str:
             if ok_entries:
                 best = max(ok_entries, key=lambda e: e.get("gen_tps", 0))
                 lines.append(
-                    f"  {model}: best={best['gen_tps']} tok/s ({best.get('name', '?')})"
+                    f"  {model}: best={best['gen_tps']} tok/s ({best.get('name', '?')})",
                 )
 
         return "\n".join(lines[:20]) if lines else "(No previous tuning data)"
@@ -769,10 +746,10 @@ def append_tune_history(
     gen_tps: float,
     pp_tps: float,
     status: str,
-    flags: Dict,
+    flags: dict,
     config_name: str,
-):
-    """Append tuning result to history"""
+) -> None:
+    """Append tuning result to history."""
     try:
         TUNE_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -798,14 +775,13 @@ def append_tune_history(
 def ai_tune(
     model_path: Path,
     server_bin: Path,
-    gpus: List[Dict],
+    gpus: list[dict],
     cpu_cores: int,
     ram_mb: int,
     verbose: bool = False,
-) -> Optional[Dict]:
-    """
-    AI-driven flag optimization
-    The model tunes itself by benchmarking different configurations
+) -> dict | None:
+    """AI-driven flag optimization
+    The model tunes itself by benchmarking different configurations.
     """
     global RUNNING_PID
     log("═══ AI Tune — iterative LLM-driven optimization ═══", verbose=verbose)
@@ -816,7 +792,7 @@ def ai_tune(
         if gpu["vram_free"] < 1000:
             log(f"  VRAM warning: GPU{gpu['index']} only has {gpu['vram_free']}MB free", verbose=verbose, level="WARNING")
             vram_ok = False
-    
+
     if not vram_ok:
         log("  WARNING: Low VRAM may cause tuning to fail or be extremely slow", verbose=verbose, level="WARNING")
         log("  Consider freeing up VRAM or running without --ai-tune", verbose=verbose, level="WARNING")
@@ -830,7 +806,7 @@ def ai_tune(
 
     # Build hardware hash
     hw_hash = hashlib.md5(
-        f"{len(gpus)}_{'_'.join(g['name'] for g in gpus)}".encode()
+        f"{len(gpus)}_{'_'.join(g['name'] for g in gpus)}".encode(),
     ).hexdigest()[:8]
 
     log(f"Hardware hash: {hw_hash}", verbose=verbose)
@@ -857,7 +833,7 @@ def ai_tune(
             return None
 
         log(
-            f"Baseline: gen={gen_tps:.2f} tok/s  pp={pp_tps:.2f} tok/s", verbose=verbose
+            f"Baseline: gen={gen_tps:.2f} tok/s  pp={pp_tps:.2f} tok/s", verbose=verbose,
         )
 
         # Build system prompt for AI tuning
@@ -940,8 +916,8 @@ Respond with JSON only.""",
             test_flags = apply_overrides(base_flags, new_flags)
 
             kill_server(PORT)
-            success, test_pid = start_server(
-                server_bin, model_path, test_flags, verbose
+            success, _test_pid = start_server(
+                server_bin, model_path, test_flags, verbose,
             )
 
             if not success:
@@ -982,7 +958,7 @@ Respond with JSON only.""",
                 best_gen = test_gen
                 best_flags = new_flags
                 best_name = config_name
-                log(f"  ★ NEW BEST!", verbose=verbose)
+                log("  ★ NEW BEST!", verbose=verbose)
 
             # Record and append history
             append_tune_history(
@@ -1003,7 +979,7 @@ Respond with JSON only.""",
                 log("  Failed to restart baseline", level="ERROR", verbose=verbose)
                 break
 
-        log(f"\nAI Tune complete!", verbose=verbose)
+        log("\nAI Tune complete!", verbose=verbose)
         log(f"Winner: {best_name} (gen={best_gen:.2f} tok/s)", verbose=verbose)
 
         return {"name": best_name, "flags": best_flags, "gen_tps": best_gen}
@@ -1013,10 +989,10 @@ Respond with JSON only.""",
 
 
 def get_server_help(server_bin: Path, verbose: bool = False) -> str:
-    """Get full --help output"""
+    """Get full --help output."""
     try:
         result = subprocess.run(
-            [str(server_bin), "--help"], capture_output=True, text=True, timeout=10
+            [str(server_bin), "--help"], capture_output=True, text=True, timeout=10,
         )
         return result.stdout[:50000]  # Limit size
     except Exception as e:
@@ -1024,8 +1000,8 @@ def get_server_help(server_bin: Path, verbose: bool = False) -> str:
         return ""
 
 
-def apply_overrides(base_flags: List[str], overrides: Dict) -> List[str]:
-    """Apply flag overrides to base flags"""
+def apply_overrides(base_flags: list[str], overrides: dict) -> list[str]:
+    """Apply flag overrides to base flags."""
     new_flags = base_flags.copy()
 
     # Remove flags that are being overridden
@@ -1060,12 +1036,12 @@ def apply_overrides(base_flags: List[str], overrides: Dict) -> List[str]:
 
 def build_flags(
     model_path: Path,
-    gpu_list: List[Dict],
+    gpu_list: list[dict],
     cpu_cores: int,
     ram_mb: int,
     verbose: bool = False,
-) -> List[str]:
-    """Build server flags based on hardware"""
+) -> list[str]:
+    """Build server flags based on hardware."""
     flags = [
         "-m",
         str(model_path),
@@ -1123,8 +1099,8 @@ def build_flags(
 # ============================================================================
 
 
-def check_for_updates():
-    """Check for llm-server-windows updates"""
+def check_for_updates() -> bool:
+    """Check for llm-server-windows updates."""
     try:
         result = requests.get(
             "https://api.github.com/repos/raketenkater/llm-server/releases/latest",
@@ -1153,34 +1129,34 @@ def check_for_updates():
 # ============================================================================
 
 
-def install_dependencies():
-    """Install required Python packages with uv/pip support"""
+def install_dependencies() -> bool | None:
+    """Install required Python packages with uv/pip support."""
     import subprocess
     import sys
-    
+
     required = ["psutil", "requests", "wmi"]
     missing = []
-    
+
     # Check for missing packages
     for pkg in required:
         try:
             __import__(pkg)
         except ImportError:
             missing.append(pkg)
-    
+
     if not missing:
         return True
-    
+
     log(f"Installing missing dependencies: {', '.join(missing)}", level="INFO")
-    
+
     # Try uv first, then pip
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install"] + missing,
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", *missing],
             check=True,
             timeout=120,
             capture_output=True,
-            text=True
+            text=True,
         )
         log("Dependencies installed successfully", level="INFO")
         return True
@@ -1192,21 +1168,15 @@ def install_dependencies():
         return False
 
 
-def main():
-    """Main entry point"""
+def main() -> int:
+    """Main entry point."""
     global RUNNING_PID
 
-    print(f"═══ llm-server Windows v{VERSION} ═══")
-    print()
 
     # Check Python version
-    if sys.version_info < (3, 8):
-        print("Error: Python 3.8+ required")
-        return 1
 
     # Install dependencies
     if not install_dependencies():
-        print("Error: Failed to install dependencies")
         return 1
 
     # Parse arguments
@@ -1254,17 +1224,6 @@ def main():
         i += 1
 
     if not model_arg:
-        print("Error: No model specified")
-        print("Usage: llm-server-windows <model.gguf> [options]")
-        print("  --verbose              Enable debug output")
-        print("  --ai-tune              Auto-optimize server flags (AI-driven)")
-        print("  --benchmark            Run benchmark and exit")
-        print("  --backend <type>       Use specific backend (ik_llama or llama)")
-        print("  --server-bin <path>    Use specific server binary")
-        print("  --gpus <list>          Use specific GPUs (e.g., 0,1)")
-        print("  --ram-budget <size>    Set RAM budget (e.g., 32G, 16384M)")
-        print("  --mmproj <path>        Use specific mmproj file for vision")
-        print("  --vision               Auto-detect/use mmproj for vision models")
         return 1
 
     # Find server binary
@@ -1274,13 +1233,8 @@ def main():
         server_bin = find_server_binary(backend)
 
     if not server_bin:
-        print("Error: llama-server binary not found")
-        print("Please install ik_llama.cpp or llama.cpp")
-        print("  GitHub: https://github.com/ggml-org/llama.cpp")
-        print("  GitHub: https://github.com/ikawrakow/ik_llama.cpp")
         return 1
 
-    print(f"Binary: {server_bin}")
 
     # Setup libraries
     setup_lib_hub(server_bin)
@@ -1294,14 +1248,11 @@ def main():
     check_for_updates()
 
     # Detect hardware
-    print()
     cpu_cores = get_cpu_cores()
-    print(f"CPU: {cpu_cores} physical cores")
 
-    ram_avail, ram_total = get_memory()
+    ram_avail, _ram_total = get_memory()
     if ram_budget > 0 and ram_budget < ram_avail:
         ram_avail = ram_budget
-    print(f"RAM: {ram_avail}MB available / {ram_total}MB total")
 
     # Detect GPUs
     all_gpus = get_gpus()
@@ -1314,42 +1265,27 @@ def main():
     total_vram = sum(g["vram_free"] for g in all_gpus)
 
     if all_gpus:
-        print(f"GPUs: {len(all_gpus)} detected")
         for gpu in all_gpus:
-            print(
-                f"  GPU{gpu['index']}: {gpu['name']} {gpu['vram_free']}MB free / {gpu['vram_total']}MB total"
-            )
+            pass
     else:
-        print("GPUs: none detected (CPU-only mode)")
+        pass
 
     # VRAM pre-flight check
     vram_ok = True
     if all_gpus:
-        print()
-        print("VRAM Pre-Flight Check:")
         for gpu in all_gpus:
-            if gpu['vram_free'] < 500:
-                print(f"  ! GPU{gpu['index']}: Only {gpu['vram_free']}MB free (needs at least 500MB)")
+            if gpu["vram_free"] < 500:
                 vram_ok = False
             else:
-                print(f"  [OK] GPU{gpu['index']}: {gpu['vram_free']}MB free available")
-        
-        if not vram_ok:
-            print()
-            print("WARNING: Some GPUs have insufficient free VRAM!")
-            print("The AI-tuning process may fail or be extremely slow.")
-            print()
-            
-            if ai_tune_flag:
-                try:
-                    response = input("Continue with AI-tuning anyway? (yes/NO): ")
-                    if response.strip().lower() != 'yes':
-                        print("Aborting. Free up VRAM or run without --ai-tune.")
-                        return 1
-                except EOFError:
-                    print("Cannot prompt for input in non-interactive mode. Aborting.")
-                    print("Free up VRAM or run without --ai-tune.")
+                pass
+
+        if not vram_ok and ai_tune_flag:
+            try:
+                response = input("Continue with AI-tuning anyway? (yes/NO): ")
+                if response.strip().lower() != "yes":
                     return 1
+            except EOFError:
+                return 1
 
     # Find model
     model_path = Path(model_arg)
@@ -1359,37 +1295,29 @@ def main():
             if alt_path.exists():
                 model_path = alt_path
             else:
-                print(f"Error: Model not found: {model_arg}")
-                print(f"  Searched: {model_path}")
-                print(f"  In model dir: {MODEL_DIR}")
                 return 1
         else:
-            print(f"Error: Model not found: {model_arg}")
             return 1
 
     # Get model info
     model_name = model_path.name
     model_mb = get_model_size(model_path)
-    layers, experts, metadata = get_model_info(model_path)
+    _layers, experts, metadata = get_model_info(model_path)
 
-    print()
-    print(f"Model: {model_name}")
-    print(f"Size: {model_mb / 1024:.2f}GB ({int(model_mb)}MB)")
-    print(f"Architecture: {layers} layers, {experts if experts > 1 else 'dense'}")
 
     if experts > 1:
-        print(f"  MoE model with {experts} experts")
+        pass
 
     if metadata["ssm"]:
-        print(f"  SSM/Mamba architecture detected")
+        pass
 
     if metadata.get("fused"):
-        print(f"  Fused up|gate tensors detected")
+        pass
 
     # Vision/mmproj handling
     mmproj_model_dir = model_path.parent
     mmproj_path_resolved = None
-    
+
     if mmproj_path == "auto":
         log("Vision: auto-detecting mmproj...", level="INFO", verbose=verbose)
         local_mmproj = find_local_mmproj(mmproj_model_dir, model_name)
@@ -1398,8 +1326,8 @@ def main():
                 mmproj_path_resolved = local_mmproj
                 log(f"Vision: validated local mmproj: {local_mmproj.name}", level="INFO", verbose=verbose)
             else:
-                log(f"Vision: local mmproj mismatch, skipping", level="DEBUG", verbose=verbose)
-    
+                log("Vision: local mmproj mismatch, skipping", level="DEBUG", verbose=verbose)
+
     elif mmproj_path:
         mmproj_resolved = Path(mmproj_path)
         if mmproj_resolved.exists():
@@ -1408,11 +1336,10 @@ def main():
             alt_path = mmproj_model_dir / mmproj_path
             if alt_path.exists():
                 mmproj_path_resolved = alt_path
-    
+
     if mmproj_path_resolved:
-        print(f"  Vision: mmproj loaded from {mmproj_path_resolved.name}")
         mmproj_path_resolved = str(mmproj_path_resolved)
-    
+
     # Memory check
     model_overhead = int(model_mb * VRAM_OVERHEAD_PERCENT / 100)
     kv_estimate = int(model_mb * 0.5)
@@ -1420,71 +1347,40 @@ def main():
         model_overhead + kv_estimate + COMPUTE_PER_GPU_MB * max(len(all_gpus), 1)
     )
 
-    print()
-    print(f"Memory check:")
-    print(f"  Model (with overhead): {model_overhead}MB")
-    print(f"  KV cache estimate: {kv_estimate}MB")
-    print(f"  Compute buffers: {COMPUTE_PER_GPU_MB * max(len(all_gpus), 1)}MB")
-    print(f"  Total needed: ~{total_needed}MB")
-    print(f"  Total available: {total_vram + ram_avail}MB (VRAM + RAM)")
 
     if total_needed > total_vram + ram_avail:
-        print(f"  [WARNING] May not fit! Consider smaller quantization or model.")
+        pass
 
     # AI Tune
     if ai_tune_flag and all_gpus:
         tuned_config = ai_tune(
-            model_path, server_bin, all_gpus, cpu_cores, ram_avail, verbose
+            model_path, server_bin, all_gpus, cpu_cores, ram_avail, verbose,
         )
         if tuned_config:
-            print(
-                f"\nAI Tune winner: {tuned_config['name']} ({tuned_config['gen_tps']:.2f} tok/s)"
-            )
-            print("Run without --ai-tune to use tuned configuration.")
             return 0
 
     # Build flags
-    print()
-    print("Building flags...")
 
     flags = build_flags(model_path, all_gpus, cpu_cores, ram_avail, verbose)
-    
+
     if mmproj_path_resolved:
         flags.extend(["--mmproj", mmproj_path_resolved])
 
-    print(f"  Context size: {CTX_SIZE}")
-    print(f"  Flash attention: on")
-    print(f"  Threads: {cpu_cores} (generation), {cpu_cores} (batch)")
 
     if all_gpus:
-        print(f"  GPU offload: enabled (-ngl 999)")
-        print(
-            f"  Tensor split: {','.join(['1'] * len(all_gpus)) if len(all_gpus) > 1 else 'single GPU'}"
-        )
+        pass
 
     # Show command
-    print()
-    print(f"Command:")
-    print(f"  {server_bin} {' '.join(flags)}")
-    print()
 
     # Start server
-    print("Starting server...")
-    print(f"Server log: {SERVER_LOG}")
-    print()
 
-    success, pid = start_server(server_bin, model_path, flags, verbose)
+    success, _pid = start_server(server_bin, model_path, flags, verbose)
 
     if not success:
-        print("Failed to start server. Check logs for details.")
         return 1
 
-    print("Server started successfully!")
-    print(f"API endpoint: http://127.0.0.1:{PORT}")
 
     if benchmark:
-        print()
-        print("Benchmarking...")
         time.sleep(5)
         try:
             result = requests.post(
@@ -1500,34 +1396,28 @@ def main():
             )
             if result.status_code == 200:
                 data = result.json()
-                tokens = data.get("usage", {}).get("completion_tokens", 0)
-                print(f"Benchmark: {tokens} tokens generated")
-        except Exception as e:
-            print(f"Benchmark failed: {e}")
+                data.get("usage", {}).get("completion_tokens", 0)
+        except Exception:
+            pass
 
-        print("Benchmark complete. Shutting down...")
         kill_server(PORT)
         return 0
 
     # Keep running
-    print()
-    print("Server is running. Press Ctrl+C to stop.")
 
     try:
         while RUNNING_PID:
             try:
                 proc = psutil.Process(RUNNING_PID)
                 if not proc.is_running():
-                    print("Server exited!")
                     break
             except:
                 break
             time.sleep(5)
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        pass
     finally:
         kill_server(PORT)
-        print("Done.")
 
     return 0
 
