@@ -8,4 +8,3 @@ dlls = sorted(bin_dir.glob("*.dll"))
 
 for _dll in dlls:
     pass
-

@@ -157,12 +157,11 @@ def get_gpus() -> list[dict[str, Any]]:
                                 if len(parts) > 2:
                                     gpu["vram_free"] = int(parts[2])
                                 break
-    except:
+    except Exception:
         pass
 
     # Filter GPUs with sufficient VRAM
     return [g for g in gpus if g["vram_free"] >= 500]
-
 
 
 def get_memory() -> tuple[int, int]:
@@ -170,7 +169,7 @@ def get_memory() -> tuple[int, int]:
     try:
         mem = psutil.virtual_memory()
         return int(mem.available / (1024 * 1024)), int(mem.total / (1024 * 1024))
-    except:
+    except Exception:
         return 8192, 8192
 
 
@@ -178,7 +177,7 @@ def get_cpu_cores() -> int:
     """Get physical CPU core count."""
     try:
         return psutil.cpu_count(logical=False) or 4
-    except:
+    except Exception:
         return 4
 
 
@@ -202,7 +201,6 @@ def get_model_info(model_path: Path) -> tuple[int, int, dict[str, Any]]:
             f.read(4)  # version
             int.from_bytes(f.read(8), "little")
             kv_count = int.from_bytes(f.read(8), "little")
-
 
             for _ in range(kv_count):
                 kl = int.from_bytes(f.read(8), "little")
@@ -251,9 +249,6 @@ def get_model_size(model_path: Path) -> float:
     return total_size / (1024 * 1024)
 
 
-
-
-
 def read_mmproj_name(mmproj_path: Path) -> str:
     """Read the 'general.name' field from mmproj GGUF file.
 
@@ -271,7 +266,21 @@ def read_mmproj_name(mmproj_path: Path) -> str:
             kvc = struct.unpack("<Q", f.read(8))[0]  # kv count
 
             # KV_FIXED: type_code -> fixed_size_in_bytes (for non-string/non-array types)
-            KV_FIXED = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:8, 7:1, 8:8, 9:8, 10:8, 11:8, 12:8}
+            KV_FIXED = {
+                0: 1,
+                1: 1,
+                2: 2,
+                3: 2,
+                4: 4,
+                5: 4,
+                6: 8,
+                7: 1,
+                8: 8,
+                9: 8,
+                10: 8,
+                11: 8,
+                12: 8,
+            }
 
             for _ in range(kvc):
                 kl_data = f.read(8)
@@ -324,7 +333,7 @@ def read_mmproj_name(mmproj_path: Path) -> str:
                     f.read(KV_FIXED[vt])
                 else:
                     break
-    except:
+    except Exception:
         pass
     return ""
 
@@ -366,7 +375,16 @@ def validate_mmproj(mmproj_path: Path, model_name: str) -> bool:
 
     # Extract base model name (remove .gguf suffix and quantization suffixes)
     base_model = model_name.lower().replace(".gguf", "")
-    for suffix in ["-q4_k_m", "-q4_k_xl", "-q5_k_xl", "-q6_k", "-q8_0", "-f16", "-f32", "-bf16"]:
+    for suffix in [
+        "-q4_k_m",
+        "-q4_k_xl",
+        "-q5_k_xl",
+        "-q6_k",
+        "-q8_0",
+        "-f16",
+        "-f32",
+        "-bf16",
+    ]:
         base_model = base_model.replace(suffix, "")
 
     mmproj_filename = mmproj_path.name.lower()
@@ -382,7 +400,14 @@ def validate_mmproj(mmproj_path: Path, model_name: str) -> bool:
             return True
 
     # Fall back to filename matching
-    mmproj_clean = mmproj_filename.replace("-", "").replace("_", "").replace("mmproj", "").replace("f16", "").replace("bf16", "").replace("f32", "")
+    mmproj_clean = (
+        mmproj_filename.replace("-", "")
+        .replace("_", "")
+        .replace("mmproj", "")
+        .replace("f16", "")
+        .replace("bf16", "")
+        .replace("f32", "")
+    )
     return bool(base_clean in mmproj_clean or mmproj_clean in base_clean)
 
 
@@ -413,7 +438,9 @@ def find_server_binary(backend: str = "") -> Path | None:
 
     # Add Windows-style paths (most common locations) - ordered by priority
     win_paths = [
-        Path(r"C:\Users\%USERNAME%\ik_llama.cpp\build\bin\llama-server.exe").expandvars(),
+        Path(
+            r"C:\Users\%USERNAME%\ik_llama.cpp\build\bin\llama-server.exe"
+        ).expandvars(),
         Path(r"C:\Users\%USERNAME%\llama.cpp\build\bin\llama-server.exe").expandvars(),
         Path(r"C:\ai\llama.cpp\build\bin\llama-server.exe"),
         Path(r"C:\ai\ik_llama.cpp\build\bin\llama-server.exe"),
@@ -436,7 +463,7 @@ def check_server_health(url: str) -> bool:
     try:
         response = requests.get(f"{url}/health", timeout=10)
         return response.status_code == 200
-    except:
+    except Exception:
         return False
 
 
@@ -452,7 +479,7 @@ def kill_server(port: int) -> None:
                 proc.wait(timeout=5)
             except psutil.TimeoutExpired:
                 proc.kill()
-        except:
+        except Exception:
             try:
                 if RUNNING_PID:
                     subprocess.run(
@@ -460,12 +487,15 @@ def kill_server(port: int) -> None:
                         capture_output=True,
                         timeout=5,
                     )
-            except:
+            except Exception:
                 pass
 
     try:
         result = subprocess.run(
-            ["netstat", "-ano"], capture_output=True, text=True, timeout=5,
+            ["netstat", "-ano"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         for line in result.stdout.strip().split("\n"):
             if f":{PORT}" in line and "LISTENING" in line:
@@ -478,14 +508,17 @@ def kill_server(port: int) -> None:
                             capture_output=True,
                             timeout=5,
                         )
-    except:
+    except Exception:
         pass
 
     RUNNING_PID = None
 
 
 def start_server(
-    server_bin: Path, model_path: Path, flags: list[str], verbose: bool = False,
+    server_bin: Path,
+    model_path: Path,
+    flags: list[str],
+    verbose: bool = False,
 ) -> tuple[bool, int | None]:
     """Start the server process. Returns (success, pid)."""
     global RUNNING_PID
@@ -504,7 +537,11 @@ def start_server(
             stdout=log_file,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS if os.name == "nt" else 0,
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                if os.name == "nt"
+                else 0
+            ),
         )
 
         RUNNING_PID = process.pid
@@ -576,7 +613,7 @@ def run_benchmark(url: str, port: int) -> tuple[float, float]:
                     gen_tps = (n_gen / (t_gen / 1000)) if t_gen > 0 else 0
 
                     return gen_tps, pp_tps
-        except:
+        except Exception:
             pass
 
         return 0.0, 0.0
@@ -680,13 +717,15 @@ def parse_tune_overrides(response_text: str) -> dict[str, Any]:
     try:
         # Try to find JSON object in response
         json_match = re.search(
-            r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", response_text, re.DOTALL,
+            r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}",
+            response_text,
+            re.DOTALL,
         )
         if json_match:
             obj = json.loads(json_match.group())
             if "flags" in obj:
                 return obj["flags"]
-    except:
+    except Exception:
         pass
 
     return {}
@@ -705,7 +744,7 @@ def load_tune_history(hw_hash: str) -> str:
                     entry = json.loads(line.strip())
                     if entry.get("hw_hash") == hw_hash:
                         history.append(entry)
-                except:
+                except Exception:
                     continue
 
         if not history:
@@ -790,12 +829,24 @@ def ai_tune(
     vram_ok = True
     for gpu in gpus:
         if gpu["vram_free"] < 1000:
-            log(f"  VRAM warning: GPU{gpu['index']} only has {gpu['vram_free']}MB free", verbose=verbose, level="WARNING")
+            log(
+                f"  VRAM warning: GPU{gpu['index']} only has {gpu['vram_free']}MB free",
+                verbose=verbose,
+                level="WARNING",
+            )
             vram_ok = False
 
     if not vram_ok:
-        log("  WARNING: Low VRAM may cause tuning to fail or be extremely slow", verbose=verbose, level="WARNING")
-        log("  Consider freeing up VRAM or running without --ai-tune", verbose=verbose, level="WARNING")
+        log(
+            "  WARNING: Low VRAM may cause tuning to fail or be extremely slow",
+            verbose=verbose,
+            level="WARNING",
+        )
+        log(
+            "  Consider freeing up VRAM or running without --ai-tune",
+            verbose=verbose,
+            level="WARNING",
+        )
 
     # Get model info
     model_name = model_path.name
@@ -833,7 +884,8 @@ def ai_tune(
             return None
 
         log(
-            f"Baseline: gen={gen_tps:.2f} tok/s  pp={pp_tps:.2f} tok/s", verbose=verbose,
+            f"Baseline: gen={gen_tps:.2f} tok/s  pp={pp_tps:.2f} tok/s",
+            verbose=verbose,
         )
 
         # Build system prompt for AI tuning
@@ -917,7 +969,10 @@ Respond with JSON only.""",
 
             kill_server(PORT)
             success, _test_pid = start_server(
-                server_bin, model_path, test_flags, verbose,
+                server_bin,
+                model_path,
+                test_flags,
+                verbose,
             )
 
             if not success:
@@ -992,7 +1047,10 @@ def get_server_help(server_bin: Path, verbose: bool = False) -> str:
     """Get full --help output."""
     try:
         result = subprocess.run(
-            [str(server_bin), "--help"], capture_output=True, text=True, timeout=10,
+            [str(server_bin), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.stdout[:50000]  # Limit size
     except Exception as e:
@@ -1172,7 +1230,6 @@ def main() -> int:
     """Main entry point."""
     global RUNNING_PID
 
-
     # Check Python version
 
     # Install dependencies
@@ -1234,7 +1291,6 @@ def main() -> int:
 
     if not server_bin:
         return 1
-
 
     # Setup libraries
     setup_lib_hub(server_bin)
@@ -1304,7 +1360,6 @@ def main() -> int:
     model_mb = get_model_size(model_path)
     _layers, experts, metadata = get_model_info(model_path)
 
-
     if experts > 1:
         pass
 
@@ -1324,9 +1379,17 @@ def main() -> int:
         if local_mmproj:
             if validate_mmproj(local_mmproj, model_name):
                 mmproj_path_resolved = local_mmproj
-                log(f"Vision: validated local mmproj: {local_mmproj.name}", level="INFO", verbose=verbose)
+                log(
+                    f"Vision: validated local mmproj: {local_mmproj.name}",
+                    level="INFO",
+                    verbose=verbose,
+                )
             else:
-                log("Vision: local mmproj mismatch, skipping", level="DEBUG", verbose=verbose)
+                log(
+                    "Vision: local mmproj mismatch, skipping",
+                    level="DEBUG",
+                    verbose=verbose,
+                )
 
     elif mmproj_path:
         mmproj_resolved = Path(mmproj_path)
@@ -1347,14 +1410,18 @@ def main() -> int:
         model_overhead + kv_estimate + COMPUTE_PER_GPU_MB * max(len(all_gpus), 1)
     )
 
-
     if total_needed > total_vram + ram_avail:
         pass
 
     # AI Tune
     if ai_tune_flag and all_gpus:
         tuned_config = ai_tune(
-            model_path, server_bin, all_gpus, cpu_cores, ram_avail, verbose,
+            model_path,
+            server_bin,
+            all_gpus,
+            cpu_cores,
+            ram_avail,
+            verbose,
         )
         if tuned_config:
             return 0
@@ -1365,7 +1432,6 @@ def main() -> int:
 
     if mmproj_path_resolved:
         flags.extend(["--mmproj", mmproj_path_resolved])
-
 
     if all_gpus:
         pass
@@ -1378,7 +1444,6 @@ def main() -> int:
 
     if not success:
         return 1
-
 
     if benchmark:
         time.sleep(5)
@@ -1411,7 +1476,7 @@ def main() -> int:
                 proc = psutil.Process(RUNNING_PID)
                 if not proc.is_running():
                     break
-            except:
+            except Exception:
                 break
             time.sleep(5)
     except KeyboardInterrupt:

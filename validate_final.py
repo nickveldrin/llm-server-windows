@@ -7,9 +7,12 @@ import sys
 
 # Check 1: Syntax
 try:
-    subprocess.run([sys.executable, "-m", "py_compile", "llm-server-windows.py"],
-                  capture_output=True, timeout=10)
-except:
+    subprocess.run(
+        [sys.executable, "-m", "py_compile", "llm-server-windows.py"],
+        capture_output=True,
+        timeout=10,
+    )
+except Exception:
     sys.exit(1)
 
 # Check 2: Find llama-server.exe
@@ -41,15 +44,22 @@ if dlls:
 else:
     print("[FAIL] No DLLs found")
 """
-result = subprocess.run([sys.executable, "-c", dll_test], capture_output=True, timeout=10)
+result = subprocess.run(
+    [sys.executable, "-c", dll_test], capture_output=True, timeout=10
+)
 
 # Check 5: Import test
 try:
-    from pathlib import Path
+    import importlib.util
 
-    import psutil
-    import requests
-    import wmi
+    for mod, name in [
+        ("pathlib", "pathlib"),
+        ("psutil", "psutil"),
+        ("requests", "requests"),
+        ("wmi", "wmi"),
+    ]:
+        if importlib.util.find_spec(name) is None:
+            print(f"Missing module: {name}")
+            sys.exit(1)
 except ImportError:
     sys.exit(1)
-

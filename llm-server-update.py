@@ -3,7 +3,6 @@
 Checks for updates and downloads the latest version.
 """
 
-import os
 import shutil
 import sys
 import tempfile
@@ -25,6 +24,7 @@ def get_latest_release():
     except Exception:
         return None
 
+
 def check_updates() -> bool:
     """Check if updates are available."""
     latest = get_latest_release()
@@ -34,8 +34,8 @@ def check_updates() -> bool:
     latest_version = latest.get("tag_name", "v0.0.0").lstrip("v")
     current_version = "2.0.0"
 
-
     return latest_version > current_version
+
 
 def download_update() -> bool | None:
     """Download the latest version."""
@@ -74,34 +74,31 @@ def download_update() -> bool | None:
             zf.extractall(extract_dir)
 
         # Clean up
-        os.unlink(tmp_path)
+        Path(tmp_path).unlink()
 
         return True
 
     except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        if Path(tmp_path).exists():
+            Path(tmp_path).unlink()
         return False
+
 
 def main() -> None:
     """Main entry point."""
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
 
-        if cmd in ["check", "--check"]:
+        if cmd in {"check", "--check"}:
             check_updates()
-        elif cmd in ["update", "--update", "--upgrade"]:
-            if check_updates():
-                if input("Download and install? [y/N] ").lower() == "y":
-                    download_update()
-        else:
-            pass
+        elif cmd in {"update", "--update", "--upgrade"} and check_updates():
+            if input("Download and install? [y/N] ").lower() == "y":
+                download_update()
     # Auto-check for updates
     elif check_updates():
         if input("Download and install? [y/N] ").lower() == "y":
             download_update()
-    else:
-        pass
+
 
 if __name__ == "__main__":
     main()

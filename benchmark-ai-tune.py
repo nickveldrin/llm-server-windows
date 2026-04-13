@@ -31,9 +31,14 @@ PORT = 8081
 def kill_port(port) -> None:
     """Kill anything on the port."""
     try:
-        pids = subprocess.check_output(
-            ["lsof", "-t", f"-i:{port}"], stderr=subprocess.DEVNULL,
-        ).decode().strip()
+        pids = (
+            subprocess.check_output(
+                ["lsof", "-t", f"-i:{port}"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
         if pids:
             for pid in pids.split("\n"):
                 with contextlib.suppress(ProcessLookupError, ValueError):
@@ -183,10 +188,18 @@ def restore_caches() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark --ai-tune across models")
-    parser.add_argument("models", nargs="*", help="Model paths (default: all in ~/ai_models)")
-    parser.add_argument("--rounds", type=int, default=10, help="Tuning rounds (default: 10)")
-    parser.add_argument("--skip", nargs="*", default=["mmproj"], help="Skip files matching patterns")
-    parser.add_argument("--model-dir", default=str(Path.home() / "ai_models"), help="Model directory")
+    parser.add_argument(
+        "models", nargs="*", help="Model paths (default: all in ~/ai_models)"
+    )
+    parser.add_argument(
+        "--rounds", type=int, default=10, help="Tuning rounds (default: 10)"
+    )
+    parser.add_argument(
+        "--skip", nargs="*", default=["mmproj"], help="Skip files matching patterns"
+    )
+    parser.add_argument(
+        "--model-dir", default=str(Path.home() / "ai_models"), help="Model directory"
+    )
     args = parser.parse_args()
 
     if args.models:
@@ -201,10 +214,9 @@ def main() -> None:
     if not models:
         sys.exit(1)
 
-
     results = []
 
-    for _i, model in enumerate(models, 1):
+    for model in models:
 
         start = time.time()
         result = run_ai_tune(model, args.rounds)
@@ -213,9 +225,17 @@ def main() -> None:
         gain_gen = 0
         gain_pp = 0
         if result["baseline_gen"] > 0:
-            gain_gen = (result["tuned_gen"] - result["baseline_gen"]) / result["baseline_gen"] * 100
+            gain_gen = (
+                (result["tuned_gen"] - result["baseline_gen"])
+                / result["baseline_gen"]
+                * 100
+            )
         if result["baseline_pp"] > 0:
-            gain_pp = (result["tuned_pp"] - result["baseline_pp"]) / result["baseline_pp"] * 100
+            gain_pp = (
+                (result["tuned_pp"] - result["baseline_pp"])
+                / result["baseline_pp"]
+                * 100
+            )
 
         result["model"] = model.name
         result["gain_gen_pct"] = round(gain_gen, 1)
@@ -223,7 +243,6 @@ def main() -> None:
         result["elapsed_min"] = round(elapsed / 60, 1)
         result["timestamp"] = datetime.utcnow().isoformat() + "Z"
         results.append(result)
-
 
     # Restore backed up caches
     restore_caches()
@@ -235,7 +254,7 @@ def main() -> None:
     sum(r["gain_gen_pct"] for r in results) / len(results) if results else 0
 
     # Save results
-    with open(RESULTS_FILE, "w") as f:
+    with Path(RESULTS_FILE).open("w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
 
 

@@ -6,8 +6,11 @@ import sys
 
 # Test 1: Check syntax
 try:
-    result = subprocess.run([sys.executable, "-m", "py_compile", "llm-server-windows.py"],
-                          capture_output=True, timeout=10)
+    result = subprocess.run(
+        [sys.executable, "-m", "py_compile", "llm-server-windows.py"],
+        capture_output=True,
+        timeout=10,
+    )
     if result.returncode == 0:
         pass
     else:
@@ -17,10 +20,15 @@ except Exception:
 
 # Test 2: Check imports
 try:
-    result = subprocess.run([
-        sys.executable, "-c",
-        "import os, sys; import psutil, requests, wmi; from pathlib import Path; import tempfile; print('OK')",
-    ], capture_output=True, timeout=10)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys; import psutil, requests, wmi; from pathlib import Path; import tempfile; print('OK')",
+        ],
+        capture_output=True,
+        timeout=10,
+    )
     if result.returncode == 0:
         pass
     else:
@@ -63,12 +71,12 @@ flags = build_flags(Path("test.gguf"), gpus, 24, 65536)
 print(f"  [OK] Flag builder: {len(flags)} flags")
 """
 
-result = subprocess.run([sys.executable, "-c", test_script],
-                       capture_output=True, timeout=15)
+result = subprocess.run(
+    [sys.executable, "-c", test_script], capture_output=True, timeout=15
+)
 if result.returncode == 0:
     output = result.stdout.decode().strip()
     for _line in output.split("\n"):
         pass
 else:
     sys.exit(1)
-

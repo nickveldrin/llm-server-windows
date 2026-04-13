@@ -3,11 +3,18 @@
 Download any GGUF model from HuggingFace with flexible options.
 """
 
+import operator
 import os
 import sys
 from pathlib import Path
 
 from huggingface_hub import HfApi, list_repo_files
+
+# ============================================================================
+# IMPORTS (moved to top to comply with PEP 8)
+# ============================================================================
+
+import argparse
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -66,7 +73,7 @@ def list_available_quantizations(repo):
                 quant_sizes[m] += size
 
         # Sort by size (smallest to largest)
-        return sorted(quant_sizes.items(), key=lambda x: x[1])
+        return sorted(quant_sizes.items(), key=operator.itemgetter(1))
     except Exception:
         return []
 
@@ -105,21 +112,18 @@ def get_download_directory(default_path=None):
     """Get or create download directory."""
     default_dir = Path(default_path) if default_path else Path.home() / "ai_models"
 
-
     if default_path:
         # If passed from llm-server, just use it without asking
         return default_dir
 
     while True:
         choice = input("Use this directory? (y/n): ").strip().lower()
-        if choice in ["y", ""]:
+        if choice in {"y", ""}:
             return default_dir
         if choice == "n":
             custom_dir = input("Enter custom path: ").strip()
             if custom_dir:
                 return Path(custom_dir)
-        else:
-            pass
 
 
 def show_progress(progress_bytes, total_bytes, filename) -> None:
@@ -160,9 +164,6 @@ def download_files(repo, files_to_download, output_dir):
             except Exception:
                 failed.append(filename)
 
-        if failed:
-            pass
-
         return downloaded, failed
 
     except Exception:
@@ -192,17 +193,6 @@ def print_usage_instructions(repo, output_dir) -> None:
         for f in mmproj_files:
             f.stat().st_size / (1024**2)
 
-    if mmproj_files:
-        pass
-    else:
-        pass
-
-
-    if mmproj_files:
-        pass
-    else:
-        pass
-
 
 def print_quick_examples() -> None:
     """Print example repositories."""
@@ -218,10 +208,6 @@ def print_quick_examples() -> None:
 
     for _name, _repo in examples:
         pass
-
-
-
-import argparse
 
 
 def get_args():
@@ -242,7 +228,6 @@ def recommend_quant(quant_list, vram_mb, ram_mb):
     # Reserve overhead for KV cache, compute buffers, OS (~30% of model size or 2GB min)
     overhead_mb = 2048
 
-
     # Pick the largest quant that fits in total memory (VRAM + RAM)
     # Iterate from largest to smallest to find the best quality that fits
     best = None
@@ -261,7 +246,10 @@ def recommend_quant(quant_list, vram_mb, ram_mb):
         # Nothing fits — recommend smallest
         quant_name, size_bytes = quant_list[0]
         size_mb = size_bytes / (1024 * 1024)
-        best = (quant_name, f"Smallest available ({size_mb / 1024:.1f}GB) — may not fit, consider a smaller model")
+        best = (
+            quant_name,
+            f"Smallest available ({size_mb / 1024:.1f}GB) — may not fit, consider a smaller model",
+        )
 
     return best
 
@@ -275,7 +263,7 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
 
         if has_safetensors and not has_ggufs:
             return None
-    except:
+    except Exception:
         pass
 
     quant_list = list_available_quantizations(repo)
@@ -287,12 +275,9 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
     rec_q = ""
     if vram_mb > 0:
         rec_q, _rec_reason = recommend_quant(quant_list, vram_mb, ram_mb)
-        if rec_q:
-            pass
 
-    for _i, (_q, size_bytes) in enumerate(quant_list, 1):
+    for _q, size_bytes in quant_list:
         size_bytes / (1024**3)
-
 
     while True:
         choice = input("Select number (or Enter for default): ").strip()
@@ -306,7 +291,6 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
                 return quant_list[idx][0]
         except ValueError:
             pass
-
 
 
 def main() -> None:
@@ -327,18 +311,13 @@ def main() -> None:
 
         for _f in files_to_download[:5]:  # Show first 5
             pass
-        if len(files_to_download) > 5:
-            pass
+        len(files_to_download) > 5
 
         # Get download directory
         output_dir = get_download_directory(args.dir)
         # Save directly to output_dir without subfolders
 
         # Confirm
-        if selected_quantization:
-            pass
-        else:
-            pass
 
         confirm = input("\nStart download? (y/n): ").strip().lower()
         if confirm != "y":
@@ -349,8 +328,6 @@ def main() -> None:
 
         if downloaded:
             print_usage_instructions(repo, output_dir)
-        else:
-            pass
 
     except KeyboardInterrupt:
         sys.exit(1)

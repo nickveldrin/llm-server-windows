@@ -13,4 +13,12 @@ llama_dir = Path(r"D:\ai\loaders\llamacpp")
 result = subprocess.run(["where", "llama-server.exe"], capture_output=True, text=True)
 
 # Check if Windows can find the DLLs
-result = subprocess.run(["powershell", "-Command", "Get-Process -Name llama-server 2>$null; Write-Host 'Process check done'"], capture_output=True, text=True)
+result = subprocess.run(
+    [
+        "powershell",
+        "-Command",
+        "Get-Process -Name llama-server 2>$null; Write-Host 'Process check done'",
+    ],
+    capture_output=True,
+    text=True,
+)
