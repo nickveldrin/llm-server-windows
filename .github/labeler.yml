@@ -2,25 +2,24 @@
 # https://github.com/actions/labeler
 
 labeler-automation:
-  - changed-files:
-      - any: ['.github/**/*']
+  - .github/**/*
 
 linting:
-  - changed-files:
-      - any: ['*.py', '**/*.py']
+  - "*.py"
+  - "**/*.py"
 
 shell:
-  - changed-files:
-      - any: ['*.sh', '**/*.sh']
+  - "*.sh"
+  - "**/*.sh"
 
 mac:
-  - changed-files:
-      - any: ['llm-server-mac', '**/llm-server-mac*']
+  - "llm-server-mac"
+  - "**/llm-server-mac*"
 
 windows:
-  - changed-files:
-      - any: ['llm-server-windows.py', '**/llm-server-windows*']
+  - "llm-server-windows.py"
+  - "**/llm-server-windows*"
 
 linux:
-  - changed-files:
-      - any: ['llm-server', '**/llm-server']
+  - "llm-server"
+  - "**/llm-server"
