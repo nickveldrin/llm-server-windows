@@ -209,5 +209,5 @@ MIT - same as original llm-server
 ## Credits
 
 - Original llm-server: https://github.com/raketenkater/llm-server
-- Windows port: This implementation
+- Windows port: https://github.com/nickveldrin/llm-server-windows
 - Backends: ik_llama.cpp, llama.cpp
