@@ -7,6 +7,14 @@ on:
     branches: [main]
 
 jobs:
+  labeler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/labeler@v4.3.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:
